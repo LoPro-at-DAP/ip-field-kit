@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>IP Field Kit</title>
-<meta name="description" content="Find and connect to network equipment, look up IPv4 details, check device settings, and practice subnetting. Works offline.">
+<meta name="description" content="Find and connect to network equipment, look up IPv4 and IPv6 details, check device settings, and practice IPv4 and IPv6 subnetting. Works offline.">
 <meta name="theme-color" content="#eef1f4" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0e141a" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
@@ -441,6 +441,15 @@ details.tests > summary { font: 600 1.05rem/1.3 var(--font-body); }
 .matches li { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); gap: 10px; align-items: baseline; }
 .matches b { font: 600 14px var(--font-mono); color: var(--borrow); }
 
+/* IPv6 */
+.controls-in { display: grid; gap: 14px; }
+.obits.n4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.bit.split { background: repeating-linear-gradient(135deg, var(--net-tint) 0 4px, var(--host-tint) 4px 8px); color: var(--ink); }
+.sw.split { background: repeating-linear-gradient(135deg, var(--net) 0 3px, var(--host) 3px 6px); }
+.ref tr.row-alt td { background: var(--hl); font-weight: 600; box-shadow: inset 0 1px 0 var(--borrow), inset 0 -1px 0 var(--borrow); }
+.stat dd { overflow-wrap: anywhere; }
+.srow .rng { overflow-wrap: anywhere; }
+
 /* Find a device */
 .seg.seg3 { grid-template-columns: repeat(3, 1fr); }
 #view-find[data-os="windows"] .os-macos, #view-find[data-os="windows"] .os-linux,
@@ -548,19 +557,19 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
   <div id="view-lookup" class="view">
     <header class="vhead">
       <h1>Address lookup</h1>
-      <p class="lede">Enter an IP and mask to see its subnet, usable range, and what kind of address it is.</p>
+      <p class="lede">Enter an IPv4 or IPv6 address to see its subnet, range, and what kind of address it is.</p>
     </header>
 
     <section class="panel controls" aria-label="Address to look up">
       <div class="field">
         <label for="lk-ip">IP address</label>
-        <input id="lk-ip" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.130">
+        <input id="lk-ip" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.130 or 2001:db8::1">
       </div>
       <div class="field">
         <label for="lk-mask">Mask or prefix</label>
         <div class="stepper">
           <button type="button" id="lk-dec" aria-label="Shorter prefix">−</button>
-          <input id="lk-mask" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/26 or 255.255.255.192">
+          <input id="lk-mask" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/26, 255.255.255.192, or /64">
           <button type="button" id="lk-inc" aria-label="Longer prefix">+</button>
         </div>
       </div>
@@ -570,6 +579,9 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
         <button type="button" class="chip" data-ip="172.20.14.9" data-mask="255.255.240.0">172.20.14.9 /20</button>
         <button type="button" class="chip" data-ip="169.254.33.7" data-mask="">169.254.33.7</button>
         <button type="button" class="chip" data-ip="8.8.8.8" data-mask="">8.8.8.8</button>
+        <button type="button" class="chip" data-ip="2001:db8:abcd:12::1" data-mask="/64">2001:db8:abcd:12::1/64</button>
+        <button type="button" class="chip" data-ip="fe80::211:22ff:fe33:4455" data-mask="">fe80::211:22ff:fe33:4455</button>
+        <button type="button" class="chip" data-ip="fd12:3456:789a:1::10" data-mask="/64">fd12:3456:789a:1::10/64</button>
       </div>
       <div class="btnrow">
         <button type="button" id="lk-myip" class="btn" data-online>Use my public IP</button>
@@ -598,7 +610,7 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
       </section>
 
       <section>
-        <h2 class="sec">Binary</h2>
+        <h2 class="sec" id="lk-bits-title">Binary</h2>
         <div id="lk-bits" class="panel stack"></div>
       </section>
 
@@ -618,7 +630,7 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
     </div>
 
     <details class="panel ranges">
-      <summary>Special address ranges</summary>
+      <summary>Special address ranges (IPv4 and IPv6)</summary>
       <div class="scroll"><table class="ref" id="lk-ranges"></table></div>
     </details>
   </div>
@@ -643,7 +655,7 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
       <img id="sc-preview" class="preview" alt="The photo being scanned" hidden>
       <div class="field">
         <label for="sc-text">Text</label>
-        <textarea id="sc-text" rows="7" wrap="off" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="Paste ipconfig, ifconfig, ip addr, or router output here, or scan a photo."></textarea>
+        <textarea id="sc-text" rows="7" wrap="off" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="Paste ipconfig, ifconfig, ip addr, ip -6 addr, or router output here, or scan a photo."></textarea>
       </div>
       <div class="btnrow">
         <button type="button" class="btn small" id="sc-example">Try an example</button>
@@ -654,9 +666,15 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
     <p id="sc-error" class="error" role="alert" hidden></p>
 
     <section id="sc-suggest" class="panel stack" hidden>
-      <h2 class="sec">Device settings found</h2>
+      <h2 class="sec">IPv4 settings found</h2>
       <dl class="kv" id="sc-suggest-kv"></dl>
       <button type="button" class="btn primary" id="sc-check">Check these settings</button>
+    </section>
+
+    <section id="sc-suggest6" class="panel stack" hidden>
+      <h2 class="sec">IPv6 settings found</h2>
+      <dl class="kv" id="sc-suggest6-kv"></dl>
+      <button type="button" class="btn primary" id="sc-check6">Check these IPv6 settings</button>
     </section>
 
     <section id="sc-out" aria-live="polite" hidden>
@@ -670,21 +688,21 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
   <div id="view-check" class="view" hidden>
     <header class="vhead">
       <h1>Device check</h1>
-      <p class="lede">Enter a device's IP settings to catch a wrong mask, a gateway outside the subnet, or a failed DHCP lease. Then run the tests below on the device.</p>
+      <p class="lede">Enter a device's IPv4 or IPv6 settings to catch a wrong mask or prefix, a gateway outside the subnet, or a failed DHCP lease or missing router advertisement. Then run the tests below on the device.</p>
     </header>
 
     <section class="panel controls" aria-label="Device settings">
       <div class="field">
         <label for="ck-ip">Device IP address</label>
-        <input id="ck-ip" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="10.20.30.40">
+        <input id="ck-ip" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="10.20.30.40 or fd12::50">
       </div>
       <div class="field">
-        <label for="ck-mask">Subnet mask</label>
-        <input id="ck-mask" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="255.255.255.0 or /24">
+        <label for="ck-mask">Subnet mask or prefix</label>
+        <input id="ck-mask" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="255.255.255.0, /24, or /64">
       </div>
       <div class="field">
         <label for="ck-gw">Default gateway</label>
-        <input id="ck-gw" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="10.20.30.1">
+        <input id="ck-gw" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="10.20.30.1 or fe80::1">
       </div>
       <div class="presets">
         <span>Examples</span>
@@ -692,6 +710,9 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
         <button type="button" class="chip text" data-check="192.168.1.50|255.255.255.192|192.168.1.65">Gateway outside</button>
         <button type="button" class="chip text" data-check="172.16.4.0|255.255.252.0|172.16.4.1">Network address</button>
         <button type="button" class="chip text" data-check="169.254.33.7|255.255.0.0|">No DHCP</button>
+        <button type="button" class="chip text" data-check="fd12:3456:789a:10::50|/64|fe80::1">IPv6 settings</button>
+        <button type="button" class="chip text" data-check="fe80::1c2b:3d4e:5f60:7182||">IPv6, no router</button>
+        <button type="button" class="chip text" data-check="2001:db8:4a2c:10::50|/64|2001:db8:4a2c:20::1">IPv6 gateway outside</button>
       </div>
     </section>
 
@@ -723,7 +744,7 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
             <input id="ts-iface" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
           </div>
         </div>
-        <p class="cap">The device IP and gateway come from the fields at the top.</p>
+        <p class="cap">The device IP and gateway come from the fields at the top. <span id="ts-family"></span></p>
       </div>
 
       <details class="panel tests" open>
@@ -842,9 +863,9 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
       </details>
 
       <details class="panel tests">
-        <summary>ARP</summary>
+        <summary id="ts-arp-title">ARP</summary>
         <div class="tbody">
-          <p class="cap">ARP finds the MAC address that goes with an IP on the local link. If the gateway has no ARP entry, the problem is at layer 2: the cable, switch port, VLAN, or Wi-Fi. ARP also exposes duplicate IP addresses.</p>
+          <p class="cap" id="ts-arp-cap">ARP finds the MAC address that goes with an IP on the local link. If the gateway has no ARP entry, the problem is at layer 2: the cable, switch port, VLAN, or Wi-Fi. ARP also exposes duplicate IP addresses.</p>
           <div class="tbody" id="ts-arp"></div>
           <div class="inset">
             <h3 class="sub">See it in Wireshark</h3>
@@ -921,11 +942,11 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
           <div class="row">
             <div class="field grow">
               <label for="fd-ip-2">Device IP</label>
-              <input id="fd-ip-2" data-bind="ip" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.64">
+              <input id="fd-ip-2" data-bind="ip" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.64 or fe80::…">
             </div>
             <div class="field pfx">
               <label for="fd-prefix-2">Prefix</label>
-              <input id="fd-prefix-2" data-bind="prefix" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/24">
+              <input id="fd-prefix-2" data-bind="prefix" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/24">
             </div>
           </div>
           <p class="error fd-err" role="alert" hidden></p>
@@ -947,11 +968,11 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
           <div class="row">
             <div class="field grow">
               <label for="fd-ip-3">Device IP</label>
-              <input id="fd-ip-3" data-bind="ip" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.64">
+              <input id="fd-ip-3" data-bind="ip" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.64 or fe80::…">
             </div>
             <div class="field pfx">
               <label for="fd-prefix-3">Prefix</label>
-              <input id="fd-prefix-3" data-bind="prefix" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/24">
+              <input id="fd-prefix-3" data-bind="prefix" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/24">
             </div>
           </div>
           <p class="error fd-err" role="alert" hidden></p>
@@ -967,6 +988,7 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
         <h3 class="sub">Ask every IPv6 device to answer</h3>
         <div class="tbody" id="fd-ipv6"></div>
         <aside class="why"><b>Why</b>Every IPv6-capable interface gives itself an fe80:: link-local address and listens to ff02::1, the all-nodes address. One ping to ff02::1 reaches all of them, whatever IPv4 address they have. Browsers can't open fe80:: addresses, but ping and SSH can.</aside>
+        <p class="cap">Found the device's fe80:: address? Enter it in the "Found it?" box below. Step 5 then shows how to reach it over IPv6 with no address setup.</p>
         <h3 class="sub">Sweep a common address range</h3>
         <p>Many devices ship in one of these ranges. Pick one, give your laptop an address in it, and sweep it.</p>
         <div class="presets" id="fd-sweep-presets">
@@ -991,11 +1013,11 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
           <div class="row">
             <div class="field grow">
               <label for="fd-ip-4">Device IP</label>
-              <input id="fd-ip-4" data-bind="ip" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.64">
+              <input id="fd-ip-4" data-bind="ip" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.64 or fe80::…">
             </div>
             <div class="field pfx">
               <label for="fd-prefix-4">Prefix</label>
-              <input id="fd-prefix-4" data-bind="prefix" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/24">
+              <input id="fd-prefix-4" data-bind="prefix" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/24">
             </div>
           </div>
           <p class="error fd-err" role="alert" hidden></p>
@@ -1009,7 +1031,7 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
       <div class="tbody">
         <p class="note" id="fd-suggest"></p>
         <ol class="steps" id="fd-connect"></ol>
-        <aside class="why"><b>Why</b>Your laptop delivers directly, using ARP, only to addresses inside its own subnet. Everything else goes to a gateway, and on a direct cable there isn't one. So your laptop needs an address in the device's subnet, and one no other device is using.</aside>
+        <aside class="why"><b>Why</b>Your laptop delivers directly, using ARP (or neighbor discovery in IPv6), only to addresses inside its own subnet or prefix. Everything else goes to a gateway, and on a direct cable there isn't one. So your laptop needs an address in the device's subnet that no other device is using. IPv6 link-local addresses are the exception: every fe80:: address is on the local link, so they work with no setup.</aside>
         <div class="inset">
           <h3 class="sub">Shortcuts</h3>
           <div class="tbody" id="fd-shortcuts"></div>
@@ -1022,10 +1044,15 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
   <div id="view-subnets" class="view" hidden>
     <header class="vhead">
       <h1>Subnetting practice</h1>
-      <p class="lede">Practice borrowing bits. Enter a network and how many subnets or hosts you need, work the problem yourself, then check each step of the math and where the answer sits in your lookup tables. It's also handy for planning how to split a network.</p>
+      <p class="lede">Practice borrowing bits in IPv4 or IPv6. Enter a network and how many subnets or hosts you need, work the problem yourself, then check each step of the math and where the answer sits in the lookup tables. It's also handy for planning how to split a network.</p>
     </header>
 
     <section class="panel controls" aria-label="Network to subnet">
+      <div class="seg" role="radiogroup" aria-label="IP version">
+        <input type="radio" name="sv-fam" id="sv-fam-4" value="4"><label for="sv-fam-4">IPv4</label>
+        <input type="radio" name="sv-fam" id="sv-fam-6" value="6"><label for="sv-fam-6">IPv6</label>
+      </div>
+      <div id="sv4-in" class="controls-in">
       <div class="row">
         <div class="field grow">
           <label for="sv-ip">Network address</label>
@@ -1051,8 +1078,27 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
         <input id="sv-need" type="number" inputmode="numeric" min="1" step="1">
       </div>
       <p id="sv-note" class="note" hidden></p>
+      </div>
+      <div id="sv6-in" class="controls-in" hidden>
+        <div class="field">
+          <label for="sv6-net">Network prefix</label>
+          <input id="sv6-net" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="2001:db8:abcd::/48">
+        </div>
+        <div class="presets">
+          <span>Examples</span>
+          <button type="button" class="chip" data-net6="2001:db8:abcd::/48">2001:db8:abcd::/48</button>
+          <button type="button" class="chip" data-net6="fd12:3456:789a::/48">fd12:3456:789a::/48</button>
+          <button type="button" class="chip" data-net6="2001:db8:abcd:4400::/56">2001:db8:abcd:4400::/56</button>
+        </div>
+        <div class="field">
+          <label for="sv6-need">Subnets needed</label>
+          <input id="sv6-need" type="number" inputmode="numeric" min="1" step="1">
+        </div>
+        <p id="sv6-note" class="note" hidden></p>
+      </div>
     </section>
 
+    <div id="sv4-out" class="view">
     <p id="sv-error" class="error" role="alert" hidden></p>
 
     <section id="sv-answer" aria-live="polite">
@@ -1093,6 +1139,38 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
       <li>Usable hosts = 2<sup>h</sup> − 2 because the first address is the network ID and the last is the broadcast. /31 (point-to-point links, RFC 3021) and /32 (a single host) don't follow that rule, so the solver stops at /30.</li>
       <li>Subnets = 2<sup>n</sup> counts subnet zero and the all-ones subnet, which modern routers use. Some older courses use 2<sup>n</sup> − 2, so check which rule your exam expects.</li>
     </ul>
+    </div>
+
+    <div id="sv6-out" class="view" hidden>
+      <p id="sv6-error" class="error" role="alert" hidden></p>
+      <section id="sv6-answer" aria-live="polite">
+        <h2 class="sec">Answer</h2>
+        <p id="sv6-answer-line" class="answer-line"></p>
+        <dl id="sv6-stats" class="stats"></dl>
+      </section>
+      <section id="sv6-math">
+        <h2 class="sec">The math</h2>
+        <ol id="sv6-steps" class="steps"></ol>
+      </section>
+      <section id="sv6-table-sec">
+        <h2 class="sec">Lookup table</h2>
+        <div class="panel tcard">
+          <h3 id="sv6-table-title">IPv6 subnet sizes</h3>
+          <p class="cap">IPv6 subnets are usually planned on nibble boundaries, multiples of 4 bits, so each step is one hex digit: 16 times as many subnets, each 16 times smaller. The highlighted row is your answer; a shaded row is the nibble-boundary choice.</p>
+          <div class="scroll"><table class="ref" id="sv6-table"></table></div>
+        </div>
+      </section>
+      <section id="sv6-list-sec" class="panel">
+        <h2 class="sec">Subnet prefixes</h2>
+        <p id="sv6-list-cap" class="cap"></p>
+        <div id="sv6-list" class="sublist"></div>
+        <button id="sv6-more" class="btn" type="button">Show more</button>
+      </section>
+      <ul class="notes">
+        <li>A LAN subnet in IPv6 is almost always a /64, so planning is about how many /64s you need. Sites usually get a /48 or a /56 from their provider.</li>
+        <li>IPv6 has no broadcast address and no network-address rule. Every address in a subnet can go to a device, except a few reserved anycast addresses such as the all-zeros one.</li>
+      </ul>
+    </div>
   </div>
 </main>
 

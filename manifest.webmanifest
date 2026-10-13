@@ -1,7 +1,7 @@
 {
   "name": "IP Field Kit",
   "short_name": "IP Kit",
-  "description": "Find and connect to network equipment, look up IPv4 details, check device settings, and practice subnetting. Works offline.",
+  "description": "Find and connect to network equipment, look up IPv4 and IPv6 details, check device settings, and practice IPv4 and IPv6 subnetting. Works offline.",
   "id": "./",
   "start_url": "./",
   "scope": "./",

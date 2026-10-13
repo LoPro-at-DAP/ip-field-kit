@@ -1,6 +1,6 @@
 // IP Field Kit service worker.
 // Bump VERSION whenever you change any file in SHELL so installed copies pick up the update.
-const VERSION = 'ipkit-v7';
+const VERSION = 'ipkit-v8';
 const FONT_CACHE = 'ipkit-fonts';
 const OCR_CACHE = 'ipkit-ocr'; // text-recognition engine, fetched on the first scan
 const SHELL = [

@@ -111,6 +111,177 @@
   const V6_MSG = "That's an IPv6 address. This app works with IPv4 addresses, like 192.168.1.10.";
   const ZERO_MSG = 'Leading zeros are read as decimal here (010 = 10), but some systems read them as octal (010 = 8). Leave them out of device settings.';
 
+
+  // ---------- IPv6 ----------
+  // A 128-bit address doesn't fit in a JavaScript number, so IPv6 math uses BigInt.
+  const ALL128 = (1n << 128n) - 1n;
+  const B = (x) => BigInt(x);
+
+  function parseIP6(str) {
+    let s = String(str).trim().toLowerCase();
+    let zone = '';
+    const z = s.indexOf('%');
+    if (z >= 0) {
+      zone = s.slice(z + 1);
+      s = s.slice(0, z);
+      if (!/^[0-9a-z._-]+$/.test(zone)) return null;
+    }
+    if (!s.includes(':') || !/^[0-9a-f:.]+$/.test(s)) return null;
+    const v4 = s.match(/^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/); // ::ffff:192.168.1.5
+    if (v4) {
+      const n4 = parseIP(v4[2]);
+      if (n4 === null) return null;
+      s = v4[1] + Math.floor(n4 / 65536).toString(16) + ':' + (n4 % 65536).toString(16);
+    }
+    if (s.includes('.')) return null;
+    const halves = s.split('::');
+    if (halves.length > 2) return null;
+    const head = halves[0] ? halves[0].split(':') : [];
+    const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+    let groups = head;
+    if (halves.length === 2) {
+      if (head.length + tail.length > 7) return null;
+      groups = [...head, ...Array(8 - head.length - tail.length).fill('0'), ...tail];
+    }
+    if (groups.length !== 8) return null;
+    let n = 0n;
+    for (const g of groups) {
+      if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
+      n = (n << 16n) | B(parseInt(g, 16));
+    }
+    return { n, zone };
+  }
+
+  const hextets = (n) => Array.from({ length: 8 }, (_, i) => Number((n >> B((7 - i) * 16)) & 0xffffn));
+  // Short form (RFC 5952): lowercase, no leading zeros, the longest run of two or more zero groups becomes ::.
+  function fmt6(n) {
+    const h = hextets(n);
+    if (h.slice(0, 5).every((x) => x === 0) && h[5] === 0xffff) return '::ffff:' + ipStr(h[6] * 65536 + h[7]);
+    let bs = -1, bl = 1;
+    for (let i = 0; i < 8; ) {
+      if (h[i] !== 0) { i++; continue; }
+      let j = i;
+      while (j < 8 && h[j] === 0) j++;
+      if (j - i > bl) { bs = i; bl = j - i; }
+      i = j;
+    }
+    const hx = (a) => a.map((x) => x.toString(16)).join(':');
+    return bs < 0 ? hx(h) : `${hx(h.slice(0, bs))}::${hx(h.slice(bs + bl))}`;
+  }
+  const full6 = (n) => hextets(n).map((x) => x.toString(16).padStart(4, '0')).join(':');
+  const mask6 = (p) => (p === 0 ? 0n : ALL128 ^ ((1n << B(128 - p)) - 1n));
+  const net6 = (n, p) => n & mask6(p);
+  const last6 = (n, p) => n | (ALL128 ^ mask6(p));
+  const big = (b) => b.toLocaleString('en-US');
+  const ORD6 = ['1st', '2nd', '3rd', '4th', '5th', '6th', '7th', '8th'];
+
+  // IANA special-purpose IPv6 ranges. dev = whether a device can use the address: ok, warn, or bad.
+  const SPECIAL6 = [
+    ['::', 128, 'Unspecified address', 'reserved', 'bad', 'Means "no address yet". A device uses it only while it checks that its address is free.'],
+    ['::1', 128, 'Loopback', 'special', 'bad', 'Traffic sent here never leaves the device. The IPv6 version of 127.0.0.1.'],
+    ['::ffff:0:0', 96, 'IPv4-mapped', 'special', 'bad', 'An IPv4 address written in IPv6 form, used inside software. It never appears on the wire.'],
+    ['64:ff9b::', 96, 'NAT64 translation', 'special', 'ok', 'Reaches an IPv4 host through a NAT64 gateway. The last 32 bits are the IPv4 address.'],
+    ['64:ff9b:1::', 48, 'Local NAT64 translation', 'special', 'ok', 'A NAT64 prefix for use inside one network.'],
+    ['100::', 64, 'Discard-only', 'reserved', 'bad', 'Traffic sent here is dropped on purpose (RFC 6666).'],
+    ['2001::', 32, 'Teredo tunneling', 'special', 'ok', 'IPv6 tunneled over IPv4 UDP. The Teredo server and client IPv4 addresses are encoded in it.'],
+    ['2001:2::', 48, 'Benchmark testing', 'reserved', 'warn', 'Set aside for lab testing of network equipment.'],
+    ['2001:20::', 28, 'ORCHIDv2', 'reserved', 'bad', 'Identifiers for overlay networks, not routable addresses.'],
+    ['2001:db8::', 32, 'Documentation', 'reserved', 'warn', 'Set aside for examples in documentation. Not used on real networks.'],
+    ['2002::', 16, '6to4', 'special', 'ok', 'An older way to tunnel IPv6 over IPv4. Bits 16 to 47 hold the IPv4 address.'],
+    ['3fff::', 20, 'Documentation', 'reserved', 'warn', 'Set aside for examples in documentation (RFC 9637). Not used on real networks.'],
+    ['5f00::', 16, 'SRv6 segment IDs', 'reserved', 'bad', 'Used by segment-routing networks, not by ordinary devices.'],
+    ['fc00::', 7, 'Unique local (ULA)', 'private', 'ok', 'Private IPv6 for use inside an organization, like 10.x.x.x in IPv4. Not routed on the internet. In practice these start with fd.'],
+    ['fe80::', 10, 'Link-local', 'special', 'warn', 'Every IPv6 interface gives itself one. It only works on the local link, so commands need the interface too, like fe80::1%eth0.'],
+    ['ff00::', 8, 'Multicast', 'special', 'bad', 'Addresses a group of receivers, not one device. IPv6 uses multicast where IPv4 used broadcast.'],
+  ].map(([a, p, label, kind, dev, note]) => ({ net: parseIP6(a).n, p, cidr: `${a}/${p}`, label, kind, dev, note }));
+  const GLOBAL6 = { net: 1n << 125n, p: 3, cidr: '2000::/3', label: 'Global unicast (public)', kind: 'public', dev: 'ok', note: 'Routable on the internet and registered to an organization, like a public IPv4 address.' };
+  const RESERVED6 = { label: 'Reserved by the IETF', kind: 'reserved', dev: 'bad', note: 'Not assigned for use.' };
+  function classify6(n) {
+    let best = null;
+    for (const s of SPECIAL6) if (net6(n, s.p) === s.net && (!best || s.p > best.p)) best = s;
+    if (best) return best;
+    return net6(n, 3) === GLOBAL6.net ? GLOBAL6 : RESERVED6;
+  }
+  const isLL6 = (n) => net6(n, 10) === parseIP6('fe80::').n;
+
+  const MC_SCOPE = { 1: 'interface-local', 2: 'link-local', 3: 'realm-local', 4: 'admin-local', 5: 'site-local', 8: 'organization-local', 14: 'global' };
+  const MC_GROUPS = [['ff02::1', 'all devices on the link'], ['ff02::2', 'all routers on the link'], ['ff02::fb', 'mDNS'], ['ff02::1:2', 'DHCPv6 servers and relays'], ['ff02::16', 'MLDv2 reports'], ['ff05::1:3', 'DHCPv6 servers']].map(([a, d]) => [parseIP6(a).n, d]);
+  const SOLICITED = parseIP6('ff02::1:ff00:0').n;
+  function mcast6(n) {
+    const scope = Number((n >> 112n) & 0xfn);
+    const known = MC_GROUPS.find(([g]) => g === n);
+    const what = known ? `: ${known[1]}` : net6(n, 104) === SOLICITED ? ': solicited-node, used by neighbor discovery' : '';
+    return `Multicast group, ${MC_SCOPE[scope] || 'scope ' + scope.toString(16)} scope${what}.`;
+  }
+  const solicited6 = (n) => SOLICITED | (n & 0xffffffn);
+  const rev6 = (n) => full6(n).replace(/:/g, '').split('').reverse().join('.') + '.ip6.arpa';
+
+  // The last 64 bits. ff:fe in the middle means it was built from a MAC (EUI-64).
+  function iid6(n) {
+    const iid = n & ((1n << 64n) - 1n);
+    const b = Array.from({ length: 8 }, (_, i) => Number((iid >> B((7 - i) * 8)) & 0xffn));
+    if (b[3] === 0xff && b[4] === 0xfe) return { kind: 'eui64', short: fmt6(iid), mac: [b[0] ^ 2, b[1], b[2], b[5], b[6], b[7]].map((x) => x.toString(16).padStart(2, '0')).join(':') };
+    return { kind: iid < 0x10000n ? 'manual' : 'random', short: fmt6(iid) };
+  }
+  function embedded4(n, sp) {
+    if (sp.label === 'IPv4-mapped' || sp.label === 'NAT64 translation') return ['Embedded IPv4', ipStr(Number(n & 0xffffffffn))];
+    if (sp.label === '6to4') return ['Embedded IPv4', ipStr(Number((n >> 80n) & 0xffffffffn))];
+    if (sp.label === 'Teredo tunneling') return ['Teredo server, client', `${ipStr(Number((n >> 64n) & 0xffffffffn))}, ${ipStr(Number((n & 0xffffffffn) ^ 0xffffffffn))}`];
+    return null;
+  }
+
+  // Find IPv6 addresses in text, with an optional %zone and /prefix.
+  // The address must not run straight into more address characters, so "1:2:3:4:5:6:7:8:9" isn't read as its first eight groups.
+  const IP6_IN_TEXT = /(^|[^0-9a-z:.%])((?:[0-9a-f]{0,4}:){2,7}(?:\d{1,3}(?:\.\d{1,3}){3}|[0-9a-f]{1,4})?)(?![0-9a-f:]|\.\d)(%[0-9a-z._-]+)?(?:\s*\/\s*(\d{1,3})(?!\d))?/gi;
+  function findIP6(text) {
+    const out = [];
+    IP6_IN_TEXT.lastIndex = 0;
+    let m;
+    while ((m = IP6_IN_TEXT.exec(text))) {
+      const r = parseIP6(m[2] + (m[3] || ''));
+      const prefix = m[4] !== undefined ? Number(m[4]) : null;
+      if (r && (prefix === null || prefix <= 128)) out.push({ start: m.index + m[1].length, end: m.index + m[0].length, n: r.n, zone: r.zone, prefix });
+    }
+    return out;
+  }
+  function readAddress6(str) {
+    const s = String(str).trim();
+    const f = findIP6(s)[0];
+    if (!f) return null;
+    return { n: f.n, zone: f.zone, prefix: f.prefix, extra: s.slice(f.start, f.end).trim() !== s };
+  }
+  // IPv6 uses a prefix length: "/64", "64", or "prefixlen 64" as macOS prints it.
+  function parsePrefix6(str) {
+    const s = String(str).trim();
+    if (!s) return { empty: true };
+    const m = s.match(/^\/?\s*(\d{1,3})$/) || s.match(/\/\s*(\d{1,3})(?!\d)/) || s.match(/prefix(?:len(?:gth)?)?\s*[:=]?\s*(\d{1,3})/i);
+    if (m) return Number(m[1]) <= 128 ? { p: Number(m[1]) } : { error: `/${m[1]} isn't a valid IPv6 prefix. Use 0 to 128.` };
+    if (parseIP(s) !== null || /^0x/i.test(s)) return { error: 'IPv6 uses a prefix length like /64, not a dotted or hex mask.' };
+    return { error: 'Enter the prefix length, like /64.' };
+  }
+
+  // Hex digits colored by prefix. Each hex digit is 4 bits (a nibble), so prefixes on multiples of 4 change whole digits.
+  function nibbles6(n, p, base = p) {
+    const hex = full6(n).replace(/:/g, '');
+    const h = hextets(n);
+    let html = `<div class="bits" role="img" aria-label="${full6(n)}: the first ${base} bits are the network${p > base ? `, the next ${p - base} are subnet bits` : ''}, the last ${128 - p} are host bits">`;
+    for (let x = 0; x < 8; x++) {
+      let cells = '';
+      for (let j = 0; j < 4; j++) {
+        const i = x * 4 + j, lo = i * 4, hi = lo + 4;
+        const cls = hi <= base ? 'net' : lo >= p ? 'hst' : lo >= base && hi <= p ? 'brw' : 'split';
+        cells += `<span class="bit ${cls}">${hex[i]}</span>`;
+      }
+      html += `<div class="octet"><div class="obits n4">${cells}</div><div class="odec"><span>${ORD6[x]}</span><b>${h[x].toString(16)}</b></div></div>`;
+    }
+    html += '</div>';
+    const leg = [`<li><i class="sw net"></i>Network: ${base} bits</li>`];
+    if (p > base) leg.push(`<li><i class="sw brw"></i>Subnet ID: ${p - base} bits</li>`);
+    leg.push(`<li><i class="sw hst"></i>${p >= 64 ? 'Host' : 'Interface ID and more'}: ${128 - p} bits</li>`);
+    if (base % 4 || p % 4) leg.push('<li><i class="sw split"></i>Hex digit split by a prefix</li>');
+    return html + `<ul class="legend">${leg.join('')}</ul>`;
+  }
+
   function commonPrefix(a, b) {
     let k = 0;
     while (k < 32 && netOf(a, k + 1) === netOf(b, k + 1)) k++;
@@ -193,11 +364,34 @@
   }
 
   // ---------- Lookup ----------
+  function lookup6(r6, maskText) {
+    const n = r6.n, sp = classify6(n);
+    const pm = r6.prefix !== null ? { p: r6.prefix } : parsePrefix6(maskText);
+    if (pm.error) return { error: pm.error };
+    let note = r6.extra ? `Using ${fmt6(n)} from the text you entered.` : '';
+    let p = pm.p;
+    if (pm.empty) {
+      p = sp.dev === 'bad' ? 128 : 64; // special-use addresses (mapped, loopback, multicast) are single addresses
+      note = `${note} No prefix entered, so this uses /${p}${p === 64 ? ', the standard size for an IPv6 subnet' : ''}.`.trim();
+    }
+    const net = net6(n, p), last = last6(n, p), size = 1n << B(128 - p);
+    let role, roleKind = 'info';
+    if (sp.label === 'Multicast') role = mcast6(n);
+    else if (p === 128) role = 'A single address (/128).';
+    else if (p === 127) role = 'Point-to-point link (/127, RFC 6164). Both addresses are usable.';
+    else if (n === net && sp.dev !== 'bad') { roleKind = 'bad'; role = "Subnet-router anycast address (all-zeros interface ID). Routers answer it, so don't give it to a device."; }
+    else if (sp.dev === 'bad') role = `${sp.label} address.`;
+    else { roleKind = 'ok'; role = 'Usable address. IPv6 has no broadcast, so nearly every address in the prefix can go to a device.'; }
+    return { v6: true, n, zone: r6.zone, p, net, last, size, sp, role, roleKind, note, iid: iid6(n) };
+  }
+
   function lookupCompute(ipText, maskText) {
+    const r6 = readAddress6(ipText);
+    if (r6) return lookup6(r6, maskText);
     const comb = readAddress(ipText);
     const ip = parseIP(comb.ip);
     if (ip === null) {
-      return { error: comb.ip === '' ? 'Enter an IP address, like 192.168.1.130.' : comb.v6 ? V6_MSG : `"${comb.ip}" isn't an IPv4 address. Use four numbers from 0 to 255 separated by dots.` };
+      return { error: comb.ip === '' ? 'Enter an IP address, like 192.168.1.130 or 2001:db8::1.' : `"${comb.ip}" isn't an IPv4 or IPv6 address.` };
     }
     const cls = classOf(ip);
     const mk = parseMask(comb.mask !== null ? comb.mask : maskText);
@@ -266,7 +460,7 @@
     else if (desc) rows.push(['Description', desc.description[0]]);
     if (d.name) rows.push(['Network name', d.name]);
     if (d.startAddress && d.endAddress) rows.push(['Range', `${d.startAddress} – ${d.endAddress}`]);
-    const cidrs = Array.isArray(d.cidr0_cidrs) ? d.cidr0_cidrs.filter((c) => c.v4prefix).map((c) => `${c.v4prefix}/${c.length}`) : [];
+    const cidrs = Array.isArray(d.cidr0_cidrs) ? d.cidr0_cidrs.filter((c) => c.v4prefix || c.v6prefix).map((c) => `${c.v4prefix || c.v6prefix}/${c.length}`) : [];
     if (cidrs.length) rows.push(['CIDR', cidrs.join(', ')]);
     if (d.country) rows.push(['Country', d.country]);
     const regEvent = Array.isArray(d.events) ? d.events.find((e) => e.eventAction === 'registration') : null;
@@ -287,7 +481,8 @@
     // Ranges reference table (static).
     $('lk-ranges').innerHTML = '<thead><tr><th scope="col">Range</th><th scope="col">Use</th></tr></thead><tbody>' +
       SPECIAL.filter((s) => s.p < 32).sort((a, b) => a.net - b.net).map((s) => `<tr><td>${s.cidr}</td><td>${esc(s.label)}</td></tr>`).join('') +
-      '<tr><td>255.255.255.255/32</td><td>Limited broadcast (RFC 919)</td></tr></tbody>';
+      '<tr><td>255.255.255.255/32</td><td>Limited broadcast (RFC 919)</td></tr>' +
+      [GLOBAL6, ...SPECIAL6].map((s) => `<tr><td>${s.cidr}</td><td>${esc(s.label)}</td></tr>`).join('') + '</tbody>';
 
     function run() {
       const r = lookupCompute(ipEl.value, maskEl.value);
@@ -301,7 +496,60 @@
       store.set('lookup', { ip: ipEl.value, mask: maskEl.value });
     }
 
+    function render6(r) {
+      const s = r.sp;
+      $('lk-addr').innerHTML = `${fmt6(r.n)}${r.zone ? `%${esc(r.zone)}` : ''}<span class="pfx">/${r.p}</span>`;
+      const role = $('lk-role');
+      role.className = 'role ' + r.roleKind;
+      role.textContent = r.role;
+      $('lk-badges').innerHTML = `<span class="badge ${s.kind}">${esc(s.label)}</span><span class="badge">IPv6</span>`;
+      $('lk-type-note').textContent = s.note;
+      const unicast = s.label !== 'Multicast';
+      $('lk-subnet').innerHTML = kvRows([
+        ['Prefix', `${fmt6(r.net)}<span class="pfx">/${r.p}</span>`, `${fmt6(r.net)}/${r.p}`],
+        ['First address', fmt6(r.net), fmt6(r.net)],
+        ['Last address', fmt6(r.last), fmt6(r.last)],
+        ['Broadcast', '<span class="muted">None. IPv6 uses multicast instead.</span>', null],
+        ['Total addresses', `${big(r.size)} <span class="muted">(2<sup>${128 - r.p}</sup>)</span>`, null],
+        r.p < 64 ? ['/64 subnets inside', big(1n << B(64 - r.p)), null] : null,
+        ['Prefix length', `/${r.p}${r.p > 64 && r.p < 127 && unicast ? ' <span class="muted">(longer than /64, so no SLAAC)</span>' : ''}`, `/${r.p}`],
+      ]);
+      const prev = r.net > 0n ? r.net - r.size : null;
+      const next = r.last < ALL128 ? r.last + 1n : null;
+      const pb = $('lk-prev'), nb = $('lk-next');
+      pb.hidden = prev === null;
+      nb.hidden = next === null;
+      if (prev !== null) { pb.querySelector('span').textContent = `${fmt6(prev)}/${r.p}`; pb.dataset.net = prev.toString(); }
+      if (next !== null) { nb.querySelector('span').textContent = `${fmt6(next)}/${r.p}`; nb.dataset.net = next.toString(); }
+      $('lk-split').hidden = !(r.p >= 8 && r.p <= 124);
+      $('lk-bits-title').textContent = 'Hex digits';
+      $('lk-bits').innerHTML = nibbles6(r.n, r.p);
+      const e4 = embedded4(r.n, s);
+      const iidText = { eui64: 'built from a MAC (EUI-64)', manual: 'a small number: set by hand or by DHCPv6', random: 'random: a privacy or stable address (SLAAC)' }[r.iid.kind];
+      $('lk-formats').innerHTML = kvRows([
+        ['Full form', full6(r.n), full6(r.n)],
+        ['Short form', fmt6(r.n), fmt6(r.n)],
+        unicast && s.dev !== 'bad' ? ['Interface ID', `${r.iid.short} <span class="muted">(${iidText})</span>`, r.iid.short] : null,
+        unicast && r.iid.kind === 'eui64' ? ['MAC address', r.iid.mac, r.iid.mac] : null,
+        unicast && s.dev !== 'bad' ? ['Solicited-node multicast', fmt6(solicited6(r.n)), fmt6(solicited6(r.n))] : null,
+        e4 ? [e4[0], e4[1], e4[1]] : null,
+        ['Reverse DNS name', rev6(r.n), rev6(r.n)],
+      ]);
+      const isPublic = s.kind === 'public';
+      const ipText = fmt6(r.n);
+      $('lk-owner-btn').hidden = !isPublic;
+      $('lk-owner-cap').textContent = isPublic
+        ? 'Asks the regional internet registry who holds this address (ISP, company, or cloud provider). Sends the address to rdap.org.'
+        : "Link-local, unique local, and reserved addresses aren't registered to an owner, so there's nothing to look up.";
+      if (ownerIp !== ipText) {
+        ownerIp = null;
+        $('lk-owner-out').hidden = true;
+        $('lk-owner-out').innerHTML = '';
+      }
+    }
+
     function render(r) {
+      if (r.v6) { render6(r); return; }
       const s = r.special;
       $('lk-addr').innerHTML = `${ipStr(r.ip)}<span class="pfx">/${r.p}</span>`;
       const role = $('lk-role');
@@ -332,6 +580,7 @@
       if (next !== null) { nb.querySelector('span').textContent = `${ipStr(next)}/${r.p}`; nb.dataset.net = String(next); }
       $('lk-split').hidden = !(r.p >= 8 && r.p <= 29);
 
+      $('lk-bits-title').textContent = 'Binary';
       $('lk-bits').innerHTML = addrBits(r.ip, r.p);
 
       const o = octets(r.ip);
@@ -372,7 +621,7 @@
     async function lookupOwner() {
       const r = current;
       if (!r) return;
-      const ip = ipStr(r.ip);
+      const ip = r.v6 ? fmt6(r.n) : ipStr(r.ip);
       const out = $('lk-owner-out'), btn = $('lk-owner-btn');
       btn.disabled = true;
       out.hidden = false;
@@ -400,11 +649,13 @@
     }
 
     function step(delta) {
+      const r6 = readAddress6(ipEl.value);
       const comb = readAddress(ipEl.value);
-      if (parseIP(comb.ip) !== null && (comb.mask !== null || comb.extra)) { ipEl.value = comb.ip; if (comb.mask !== null) maskEl.value = comb.mask; }
-      const mk = parseMask(maskEl.value);
-      const p = mk.p !== undefined ? mk.p : current ? current.p : 24;
-      maskEl.value = '/' + Math.max(0, Math.min(32, p + delta));
+      if (r6) { if (r6.prefix !== null || r6.extra) { ipEl.value = fmt6(r6.n) + (r6.zone ? '%' + r6.zone : ''); if (r6.prefix !== null) maskEl.value = '/' + r6.prefix; } }
+      else if (parseIP(comb.ip) !== null && (comb.mask !== null || comb.extra)) { ipEl.value = comb.ip; if (comb.mask !== null) maskEl.value = comb.mask; }
+      const mk = r6 ? parsePrefix6(maskEl.value) : parseMask(maskEl.value);
+      const p = mk.p !== undefined ? mk.p : current ? current.p : r6 ? 64 : 24;
+      maskEl.value = '/' + Math.max(0, Math.min(r6 ? 128 : 32, p + delta));
       run();
     }
 
@@ -423,13 +674,14 @@
     $('lk-owner-btn').addEventListener('click', lookupOwner);
     [$('lk-prev'), $('lk-next')].forEach((b) => b.addEventListener('click', () => {
       if (!current) return;
-      ipEl.value = ipStr(Number(b.dataset.net));
+      ipEl.value = current.v6 ? fmt6(BigInt(b.dataset.net)) : ipStr(Number(b.dataset.net));
       maskEl.value = '/' + current.p;
       run();
     }));
     $('lk-split').addEventListener('click', () => {
       if (!current) return;
-      solver.setNetwork(ipStr(current.net), current.p);
+      if (current.v6) solver.setNetwork6(`${fmt6(current.net)}/${current.p}`);
+      else solver.setNetwork(ipStr(current.net), current.p);
       location.hash = '#subnets';
     });
     document.querySelectorAll('#lk-examples [data-ip]').forEach((b) => b.addEventListener('click', () => {
@@ -450,9 +702,10 @@
       b.disabled = true;
       b.textContent = 'Checking…';
       try {
-        const res = await fetchTimeout('https://api.ipify.org?format=json', 8000);
+        // api64 answers over IPv6 when the device has it, otherwise over IPv4.
+        const res = await fetchTimeout('https://api64.ipify.org?format=json', 8000);
         const d = await res.json();
-        if (!d || parseIP(d.ip) === null) throw new Error('bad response');
+        if (!d || (parseIP(d.ip) === null && !parseIP6(d.ip))) throw new Error('bad response');
         ipEl.value = d.ip;
         maskEl.value = '';
         run();
@@ -470,11 +723,76 @@
   }
 
   // ---------- Device check ----------
+  function check6(r6, maskT, gwT) {
+    const n = r6.n;
+    let p = r6.prefix, assumed = false;
+    if (p === null) {
+      const pm = parsePrefix6(maskT);
+      if (pm.error) return { error: pm.error };
+      if (pm.empty) { p = 64; assumed = true; } else p = pm.p;
+    }
+    const items = [];
+    const add = (st, html) => items.push({ s: st, html });
+    if (assumed) add('info', "No prefix length entered, so this assumes /64, the standard IPv6 subnet size. Windows ipconfig doesn't show it; ip addr and ifconfig do.");
+    else if (p === 64) add('ok', 'Prefix /64 is the standard IPv6 subnet size.');
+    else if (p >= 127) add('ok', `/${p} is normal for a point-to-point link or a single address.`);
+    else add('warn', `/${p} isn't the usual /64. Automatic addressing (SLAAC) only works on a /64, so this device needs a static address or DHCPv6.`);
+
+    const sp = classify6(n);
+    const ll = sp.label === 'Link-local';
+    if (ll) add('warn', `<b>${fmt6(n)}</b> is link-local, so it only works on this cable or Wi-Fi network. If it's the device's only IPv6 address, no router advertisement reached it, so it has no SLAAC or DHCPv6 address. Check that a router on this link sends advertisements.`);
+    else if (sp.dev === 'bad') add('bad', `<b>${fmt6(n)}</b> is in a ${esc(sp.label)} range and can't be a device address. ${esc(sp.note)}`);
+    else if (sp.dev === 'warn') add('warn', `<b>${fmt6(n)}</b> is in a ${esc(sp.label)} range. ${esc(sp.note)}`);
+    else add('ok', `<b>${fmt6(n)}</b> is ${sp.kind === 'public' ? 'a global (public)' : sp.kind === 'private' ? 'a unique local (private)' : `a ${esc(sp.label)}`} address.`);
+
+    const net = net6(n, p);
+    if (!ll && sp.dev !== 'bad' && p < 127 && n === net) add('bad', `<b>${fmt6(n)}</b> has an all-zeros interface ID. That's the subnet-router anycast address, reserved for routers. Pick another interface ID.`);
+    if (sp.dev !== 'bad') {
+      const iid = iid6(n);
+      add('info', iid.kind === 'eui64' ? `The interface ID was built from the MAC ${iid.mac} (EUI-64).`
+        : iid.kind === 'manual' ? 'The interface ID is a small number, so this address was probably set by hand or by DHCPv6.'
+        : 'The interface ID looks random: a privacy or stable address the device chose itself (SLAAC).');
+    }
+
+    const gwIn = gwT.trim();
+    const g6 = gwIn ? readAddress6(gwT) : null;
+    if (!gwIn) add('info', "Enter the IPv6 default gateway to check it too. It's usually the router's link-local address, like fe80::1.");
+    else if (!g6) {
+      if (parseIP(readAddress(gwT).ip) !== null) add('bad', "That gateway is IPv4. An IPv6 address needs an IPv6 gateway, usually the router's link-local address (fe80::…).");
+      else return { error: `"${gwIn}" isn't an IPv6 address. Check the gateway.` };
+    } else {
+      const g = g6.n, gsp = classify6(g), gz = g6.zone ? `%${esc(g6.zone)}` : '';
+      if (g === n) add('bad', "The gateway is the device's own address. It should be the router's address.");
+      else if (gsp.label === 'Link-local') {
+        add('ok', `Gateway <b>${fmt6(g)}${gz}</b> is link-local, the normal choice for an IPv6 gateway. A link-local address is always on the local link, so it doesn't need to be inside the device's prefix.`);
+        if (!g6.zone) add('info', 'In commands, write a link-local gateway with its interface: fe80::1%12 on Windows (the interface index), %en0 on macOS, %eth0 on Linux.');
+      } else if (gsp.dev === 'bad') add('bad', `Gateway <b>${fmt6(g)}</b> is in a ${esc(gsp.label)} range and can't be a gateway.`);
+      else if (net6(g, p) !== net) {
+        let cp = 0;
+        while (cp < 128 && net6(g, cp + 1) === net6(n, cp + 1)) cp++;
+        add('bad', `Gateway <b>${fmt6(g)}</b> is outside the device's prefix ${fmt6(net)}/${p}. Use the router's address inside that prefix, or its link-local address. If this gateway is right, the prefix would need to be /${cp} or shorter.`);
+      } else add('ok', `Gateway <b>${fmt6(g)}</b> is inside the device's prefix.`);
+    }
+    return {
+      v6: true, items,
+      bad: items.filter((i) => i.s === 'bad').length,
+      warn: items.filter((i) => i.s === 'warn').length,
+      subnetRows: [
+        ['Prefix', `${fmt6(net)}<span class="pfx">/${p}</span>`, `${fmt6(net)}/${p}`],
+        ['Address range', `${fmt6(net)} – ${fmt6(last6(n, p))}`, null],
+        ['Broadcast', '<span class="muted">None in IPv6</span>', null],
+        ['Total addresses', big(1n << B(128 - p)), null],
+      ],
+    };
+  }
+
   function checkCompute(ipT, maskT, gwT) {
+    const r6 = readAddress6(ipT);
+    if (r6) return check6(r6, maskT, gwT);
     const ipR = readAddress(ipT), gwR = readAddress(gwT);
     const ipIn = ipT.trim(), gwIn = gwT.trim();
     const ip = parseIP(ipR.ip);
-    if (ip === null) return { error: !ipIn ? 'Enter the device IP address.' : ipR.v6 ? V6_MSG : `"${ipIn}" isn't an IPv4 address. Use four numbers from 0 to 255 separated by dots.` };
+    if (ip === null) return { error: !ipIn ? 'Enter the device IP address.' : `"${ipIn}" isn't an IPv4 or IPv6 address.` };
     // A mask typed with the IP ("192.168.1.5/24") counts when the mask box is empty.
     const maskIn = maskT.trim() !== '' ? maskT : (ipR.mask || '');
     const mk = parseMask(maskIn);
@@ -561,6 +879,7 @@
         `<li><span class="mark ${i.s}" aria-hidden="true">${MARK[i.s][0]}</span><p><span class="sr">${MARK[i.s][1]}: </span>${i.html}</p></li>`
       ).join('');
 
+      if (r.v6) { $('ck-subnet').innerHTML = kvRows(r.subnetRows); return; }
       const noBc = r.p >= 31;
       $('ck-subnet').innerHTML = kvRows([
         ['Network', `${ipStr(r.net)}<span class="pfx">/${r.p}</span>`, `${ipStr(r.net)}/${r.p}`],
@@ -587,8 +906,8 @@
   }
 
   // ---------- Scan ----------
-  const ROLE_LABEL = { ip: 'IP address', mask: 'Mask', gateway: 'Gateway', dns: 'DNS server', dhcp: 'DHCP server', broadcast: 'Broadcast', address: 'Address' };
-  const ROLE_CLASS = { ip: 'private', mask: '', gateway: 'special', dns: 'public', dhcp: '', broadcast: '', address: '' };
+  const ROLE_LABEL = { ip: 'IP address', ip6: 'IPv6 address', ll6: 'Link-local', mask: 'Mask', gateway: 'Gateway', dns: 'DNS server', dhcp: 'DHCP server', broadcast: 'Broadcast', address: 'Address' };
+  const ROLE_CLASS = { ip: 'private', ip6: 'private', ll6: 'special', mask: '', gateway: 'special', dns: 'public', dhcp: '', broadcast: '', address: '' };
   // The role keyword closest before an address decides its role, so "proto dhcp src 10.0.0.5" labels 10.0.0.5 by "src".
   const ROLE_WORDS = [
     ['dhcp', /dhcp/gi],
@@ -596,7 +915,7 @@
     ['gateway', /gateway|default via|\bdefault\b|\bvia\b|\bgw\b|router|next.?hop|puerta de enlace|passerelle/gi],
     ['mask', /mask|m[aá]scara|masque/gi],
     ['broadcast', /broadcast|\bbrd\b|bcast/gi],
-    ['ip', /ipv4|ip address|\binet\b|\baddr(ess)?\b|\bip\b|\bsrc\b/gi],
+    ['ip', /ipv4|ipv6|ip address|\binet6?\b|\baddr(ess)?\b|\bip\b|\bsrc\b/gi],
   ];
   // Dots may have a stray space beside them (OCR). Commas count only with no spaces, so "steps 1, 2, 3, 4" isn't an address.
   const IP_IN_TEXT = /(^|[^\d])(\d{1,3})(?: ?\. ?|,)(\d{1,3})(?: ?\. ?|,)(\d{1,3})(?: ?\. ?|,)(\d{1,3})(?: ?\/ ?(\d{1,2}))?(?!\d)/g;
@@ -637,36 +956,47 @@
       if (!line.trim()) { carry = null; return; }
       // Windows route print: the default route row is "0.0.0.0  0.0.0.0  <gateway>  <interface IP>  <metric>".
       const routeRow = /^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+\d/.test(line);
+      // Addresses from both families, in line order. IPv4 inside an IPv6 address (::ffff:1.2.3.4) belongs to the IPv6 one.
+      const cands = findIP6(line).map((f) => ({ ...f, v6: true }));
       IP_IN_TEXT.lastIndex = 0;
-      let m, prevEnd = 0, inherited = false;
-      const hits = [];
+      let m;
       while ((m = IP_IN_TEXT.exec(line))) {
-        const start = m.index + m[1].length;
-        const before = line.slice(prevEnd, start);
-        prevEnd = IP_IN_TEXT.lastIndex;
+        const start = m.index + m[1].length, end = IP_IN_TEXT.lastIndex;
+        if (cands.some((c) => c.v6 && start < c.end && end > c.start)) continue;
         const octs = [m[2], m[3], m[4], m[5]].map(Number);
         const prefix = m[6] !== undefined ? Number(m[6]) : null;
         if (octs.some((o) => o > 255) || (prefix !== null && prefix > 32)) continue;
-        const n = ((octs[0] * 256 + octs[1]) * 256 + octs[2]) * 256 + octs[3];
+        cands.push({ start, end, v6: false, prefix, n: ((octs[0] * 256 + octs[1]) * 256 + octs[2]) * 256 + octs[3] });
+      }
+      cands.sort((a, b) => a.start - b.start);
+      let prevEnd = 0, inherited = false;
+      const hits = [];
+      for (const c of cands) {
+        const before = line.slice(prevEnd, c.start);
+        prevEnd = c.end;
         if (/(version|firmware|\bfw\b|build|release|\bver\b|\bv)[\s:.]*$/i.test(before)) continue; // "Firmware 1.2.3.4" is not an address
-        if (routeRow) {
-          if (n === 0) continue;
-          hits.push({ n, prefix, role: hits.length ? 'ip' : 'gateway', lineNo, line: raw });
+        if (!c.v6 && routeRow) {
+          if (c.n === 0) continue;
+          hits.push({ n: c.n, prefix: c.prefix, role: hits.length ? 'ip' : 'gateway', lineNo, line: raw, v6: false, zone: '' });
           continue;
         }
         let role = closestRole(before);
         if (!role) {
-          const onlyThis = line.replace(m[0].slice(m[1].length), '').replace(/[\s:.,()[\]|-]/g, '') === '';
+          const onlyThis = (line.slice(0, c.start) + line.slice(c.end)).replace(/[\s:.,()[\]|-]/g, '') === '';
           if (onlyThis && carry) { role = carry; inherited = true; }
-          else if (prefix === null && prefixOfMask(n) >= 8) role = 'mask';
+          else if (!c.v6 && c.prefix === null && prefixOfMask(c.n) >= 8) role = 'mask';
           else role = 'address';
         }
-        hits.push({ n, prefix, role, lineNo, line: raw });
+        if (c.v6) {
+          if (role === 'ip' || role === 'ip6' || role === 'll6') role = isLL6(c.n) ? 'll6' : 'ip6';
+          else if (role === 'mask' || role === 'broadcast') role = 'address';
+        } else if (role === 'ip6' || role === 'll6') role = 'ip';
+        hits.push({ n: c.n, prefix: c.prefix, role, lineNo, line: raw, v6: c.v6, zone: c.zone || '' });
       }
-      // A labeled line passes its label down even when its own value wasn't IPv4 (for example an IPv6 gateway).
-      carry = closestRole(line.replace(IP_IN_TEXT, ' ')) || (inherited ? carry : null);
+      // A labeled line passes its label down even when its own value was the other family (an IPv6 gateway, say).
+      carry = closestRole(line.replace(IP6_IN_TEXT, '$1 ').replace(IP_IN_TEXT, '$1 ')) || (inherited ? carry : null);
       hits.forEach((h) => {
-        const key = `${h.role}|${h.n}|${h.prefix}`;
+        const key = `${h.role}|${h.v6 ? 6 : 4}|${h.n}|${h.prefix}`;
         if (seen.has(key)) return;
         seen.add(key);
         items.push(h);
@@ -681,6 +1011,7 @@
     const groups = [];
     let g = null;
     for (const it of items) {
+      if (it.v6) continue;
       if (it.role === 'ip' && Math.floor(it.n / 16777216) !== 127 && prefixOfMask(it.n) < 8) {
         g = { n: it.n, mask: it.prefix, cidr: it.prefix !== null, gw: null };
         groups.push(g);
@@ -691,8 +1022,19 @@
     if (!best) return null;
     // No gateway after the IP (for example, ip route pasted before ip addr): use one in the same subnet.
     let gw = best.gw;
-    if (gw === null) { const same = items.find((i) => i.role === 'gateway' && netOf(i.n, best.mask) === netOf(best.n, best.mask)); if (same) gw = same.n; }
+    if (gw === null) { const same = items.find((i) => !i.v6 && i.role === 'gateway' && netOf(i.n, best.mask) === netOf(best.n, best.mask)); if (same) gw = same.n; }
     return { ip: ipStr(best.n), mask: best.cidr ? '/' + best.mask : maskStr(best.mask), gw: gw !== null ? ipStr(gw) : '' };
+  }
+
+  // IPv6: prefer a routable address over link-local, and a gateway that is link-local or inside its /64.
+  function settingsFrom6(items) {
+    const ips = items.filter((i) => i.v6 && (i.role === 'ip6' || i.role === 'll6'));
+    if (!ips.length) return null;
+    const best = ips.find((i) => i.role === 'ip6') || ips[0];
+    const p = best.prefix !== null ? best.prefix : 64;
+    const gws = [...items.slice(items.indexOf(best) + 1), ...items].filter((i) => i.v6 && i.role === 'gateway');
+    const gw = gws.find((g) => isLL6(g.n) || net6(g.n, p) === net6(best.n, p));
+    return { ip: fmt6(best.n), prefix: best.prefix !== null ? '/' + best.prefix : '', gw: gw ? fmt6(gw.n) + (gw.zone ? '%' + gw.zone : '') : '' };
   }
 
   const SCAN_EXAMPLE = `Windows IP Configuration
@@ -700,9 +1042,12 @@
 Wireless LAN adapter Wi-Fi:
 
    Connection-specific DNS Suffix  . : lan
+   IPv6 Address. . . . . . . . . . . : fd12:3456:789a:10::50
+   Link-local IPv6 Address . . . . . : fe80::1c2b:3d4e:5f60:7182%12
    IPv4 Address. . . . . . . . . . . : 192.168.1.50
    Subnet Mask . . . . . . . . . . . : 255.255.255.192
-   Default Gateway . . . . . . . . . : 192.168.1.65
+   Default Gateway . . . . . . . . . : fe80::1%12
+                                       192.168.1.65
    DNS Servers . . . . . . . . . . . : 1.1.1.1
                                        8.8.8.8`;
 
@@ -722,6 +1067,7 @@ Wireless LAN adapter Wi-Fi:
     let busy = false;
     let items = [];
     let found = null;
+    let found6 = null;
     let timer = 0;
 
     function showProgress(label, frac) {
@@ -890,9 +1236,11 @@ Wireless LAN adapter Wi-Fi:
       }
     }
 
+    const valOf = (it) => (it.v6 ? fmt6(it.n) + (it.zone ? '%' + it.zone : '') : ipStr(it.n));
     function maskFor(idx) {
       const it = items[idx];
       if (it.prefix !== null) return '/' + it.prefix;
+      if (it.v6) return '';
       if (it.role !== 'ip') return '';
       const mi = items.slice(idx + 1).find((i) => i.role === 'mask' || i.role === 'ip');
       return mi && mi.role === 'mask' ? ipStr(mi.n) : '';
@@ -902,10 +1250,19 @@ Wireless LAN adapter Wi-Fi:
       const text = textEl.value;
       items = extractIPs(text);
       found = settingsFrom(items);
+      found6 = settingsFrom6(items);
       const has = items.length > 0;
       $('sc-out').hidden = !has;
       $('sc-none').hidden = has || text.trim() === '';
       $('sc-suggest').hidden = !found;
+      $('sc-suggest6').hidden = !found6;
+      if (found6) {
+        $('sc-suggest6-kv').innerHTML = kvRows([
+          ['IPv6 address', esc(found6.ip), null],
+          ['Prefix', found6.prefix ? esc(found6.prefix) : '<span class="muted">Not shown, so /64 is assumed</span>', null],
+          ['Gateway', found6.gw ? esc(found6.gw) : '<span class="muted">Not found</span>', null],
+        ]);
+      }
       if (found) {
         $('sc-suggest-kv').innerHTML = kvRows([
           ['IP address', found.ip, null],
@@ -915,7 +1272,7 @@ Wireless LAN adapter Wi-Fi:
       }
       $('sc-count').textContent = `${fmt(items.length)} ${items.length === 1 ? 'address' : 'addresses'} found`;
       $('sc-hits').innerHTML = items.map((it, i) => {
-        const val = ipStr(it.n) + (it.prefix !== null ? `/${it.prefix}` : '');
+        const val = valOf(it) + (it.prefix !== null ? `/${it.prefix}` : '');
         const ctx = it.line.replace(/(\s*\.){3,}\s*/g, ' … ').trim();
         return `<li class="hit"><div class="top"><span class="badge ${ROLE_CLASS[it.role]}">${ROLE_LABEL[it.role]}</span><span class="val">${val}</span></div>` +
           `<div class="acts">${it.role !== 'mask' ? `<button type="button" class="btn small" data-hit="${i}">Look up</button>` : ''}<button type="button" class="btn small" data-copy="${val}">Copy</button></div>` +
@@ -937,9 +1294,10 @@ Wireless LAN adapter Wi-Fi:
       const b = e.target.closest('[data-hit]');
       if (!b) return;
       const i = Number(b.dataset.hit);
-      lookup.load(ipStr(items[i].n), maskFor(i));
+      lookup.load(valOf(items[i]), maskFor(i));
     });
     $('sc-check').addEventListener('click', () => { if (found) check.load(found.ip, found.mask, found.gw); });
+    $('sc-check6').addEventListener('click', () => { if (found6) check.load(found6.ip, found6.prefix, found6.gw); });
     update();
   }
 
@@ -1111,6 +1469,114 @@ Wireless LAN adapter Wi-Fi:
     linux: { cmd: 'sudo ethtool -K {iface} tso off gso off gro off', what: 'Turns off segmentation offload so captured sizes match the wire. Run it again with "on" afterward.' },
   };
 
+  // IPv6 versions of the device tests. {gw} carries the interface for a link-local gateway (fe80::1%12).
+  const TESTS6 = {
+    windows: {
+      reach: [
+        { cmd: 'ipconfig /all', what: 'Look for IPv6 Address (or Temporary IPv6 Address), Link-local IPv6 Address, and a Default Gateway that starts with fe80::.',
+          out: [['bad', 'Only a Link-local IPv6 Address . . : fe80::…%12', 'No router advertisement reached the device, so it has no routable IPv6 address. Check that the router sends advertisements on this VLAN.']] },
+        { cmd: 'ping -6 -n 4 ::1', what: 'Tests the IPv6 stack on the device itself.' },
+        { cmd: 'ping -n 4 {gw}', what: 'Tests the local link to the gateway. A link-local gateway needs its interface index after the %.',
+          out: [['ok', 'Reply from {gw}: time<1ms', 'The link and the gateway are working.'],
+                ['bad', 'Destination host unreachable.', "The gateway didn't answer neighbor discovery. See the neighbor tests."]] },
+        { cmd: 'ping -6 -n 4 {target}', what: 'Tests IPv6 routing past the gateway.',
+          out: [['bad', 'Request timed out.', 'The gateway answers but IPv6 traffic stops beyond it. See the route tests.']] },
+        { cmd: 'nslookup -type=AAAA example.com', what: 'Asks DNS for the IPv6 address of a name. No AAAA answer means the name has no IPv6 address, or DNS is failing.' },
+      ],
+      mtu: [
+        { cmd: 'ping -6 -l {payload} -n 2 {target}', what: "-l sets the data size. {payload} bytes of data plus 48 bytes of IPv6 and ICMPv6 headers makes a {mtu}-byte packet. Windows has no Don't Fragment switch for IPv6 and may split a large ping itself, so a reply isn't proof the path carries {mtu} bytes. For an exact test, use macOS or Linux, or watch for Packet Too Big messages in Wireshark." },
+        { cmd: 'netsh interface ipv6 show subinterfaces', what: 'Shows the IPv6 MTU on each interface.' },
+        { cmd: 'netsh interface ipv6 set subinterface "{iface}" mtu={mtu} store=persistent', tag: 'Run as administrator', what: 'Sets the IPv6 MTU. IPv6 links must carry at least 1280 bytes.' },
+      ],
+      route: [
+        { cmd: 'route print -6', what: 'Lists IPv6 routes. ::/0 is the default route, and its gateway is usually a link-local fe80:: address.' },
+        { cmd: 'Find-NetRoute -RemoteIPAddress {target}', tag: 'PowerShell', what: 'Shows the route, interface, and source address Windows will use to reach {target}.' },
+        { cmd: 'tracert -6 -d {target}', what: 'Lists each IPv6 router on the way.' },
+        { cmd: 'pathping -6 -n {target}', what: 'Measures packet loss at every hop and takes a few minutes.' },
+      ],
+      arp: [
+        { cmd: 'netsh interface ipv6 show neighbors', what: 'Lists the IPv6 neighbor cache, the IPv6 version of the ARP table. Look for the gateway {gwplain} and its MAC.' },
+        { cmd: 'Get-NetNeighbor -AddressFamily IPv6 -IPAddress {gwplain}', tag: 'PowerShell', what: "Shows the gateway's neighbor state. Reachable or Stale is fine. Incomplete or Unreachable means it isn't answering." },
+        { cmd: 'netsh interface ipv6 delete neighbors', tag: 'Run as administrator', what: 'Clears the IPv6 neighbor cache.' },
+      ],
+    },
+    macos: {
+      reach: [
+        { cmd: 'ifconfig {iface} | grep inet6', what: 'Shows IPv6 addresses. Look for one that isn\'t fe80, a global or fd address, next to the link-local one.',
+          out: [['bad', 'inet6 fe80::…%en0 prefixlen 64 scopeid 0x4   (and nothing else)', 'No router advertisement reached the Mac, so it has no routable IPv6 address.']] },
+        { cmd: 'netstat -rn -f inet6 | grep default', what: 'Shows the IPv6 default gateway.',
+          out: [['ok', 'default    fe80::1%{iface}    UGcg    {iface}', 'The gateway is set, as the router\'s link-local address.']] },
+        { cmd: 'ping6 -c 4 {gw}', what: 'Tests the local link to the gateway.' },
+        { cmd: 'ping6 -c 4 {target}', what: 'Tests IPv6 routing past the gateway.' },
+        { cmd: 'dscacheutil -q host -a name example.com', what: 'Tests name lookups. Look for an ipv6_address line.' },
+      ],
+      mtu: [
+        { cmd: 'ping6 -D -s {payload} -c 2 {target}', what: "-D stops fragmentation and -s sets the data size. {payload} bytes of data plus 48 bytes of headers makes a {mtu}-byte packet." },
+        { cmd: 'networksetup -getMTU {iface}', what: 'Shows the interface MTU.' },
+        { cmd: 'sudo networksetup -setMTU {iface} {mtu}', what: 'Sets the interface MTU. IPv6 links must carry at least 1280 bytes.' },
+      ],
+      route: [
+        { cmd: 'netstat -rn -f inet6', what: 'Lists the IPv6 routing table. The default line is the default route.' },
+        { cmd: 'route -n get -inet6 {target}', what: 'Shows the gateway and interface macOS will use to reach {target}.' },
+        { cmd: 'traceroute6 -n {target}', what: 'Lists each IPv6 router on the way.' },
+      ],
+      arp: [
+        { cmd: 'ndp -an', what: 'Lists the IPv6 neighbor cache with MAC addresses, the IPv6 version of arp -an. Look for {gwplain}.' },
+        { cmd: 'sudo ndp -c', what: 'Clears the IPv6 neighbor cache.' },
+      ],
+    },
+    linux: {
+      reach: [
+        { cmd: 'ip -6 addr show dev {iface}', what: 'Shows IPv6 addresses. Look for one with scope global next to the scope link one.',
+          out: [['bad', 'inet6 fe80::…/64 scope link   (and nothing else)', 'No router advertisement reached the device, so it has no routable IPv6 address.']] },
+        { cmd: 'ip -6 route show default', what: 'Shows the IPv6 default gateway.',
+          out: [['ok', 'default via fe80::1 dev {iface} proto ra metric 100 pref medium', 'The gateway came from a router advertisement (proto ra).'],
+                ['bad', '(no output)', 'No IPv6 default route, so the device can only reach its own link.']] },
+        { cmd: 'ping -6 -c 4 {gw}', what: 'Tests the local link to the gateway.',
+          out: [['bad', 'From {ip} icmp_seq=1 Destination unreachable: Address unreachable', "The gateway didn't answer neighbor discovery. See the neighbor tests."]] },
+        { cmd: 'ping -6 -c 4 {target}', what: 'Tests IPv6 routing past the gateway.' },
+        { cmd: 'getent ahostsv6 example.com', what: 'Tests IPv6 name lookups through the system resolver. No output means no IPv6 answer.' },
+      ],
+      mtu: [
+        { cmd: 'ping -6 -M do -s {payload} -c 2 {target}', what: "-M do stops fragmentation and -s sets the data size. {payload} bytes of data plus 48 bytes of headers makes a {mtu}-byte packet.",
+          out: [['ok', '{payload8} bytes from {target}: icmp_seq=1 ttl=117 time=14 ms', 'Every link on the path carries {mtu}-byte packets.'],
+                ['bad', 'ping: sendmsg: Message too long', "This device's own interface MTU is smaller than the packet. Check it with ip link show {iface}."],
+                ['bad', 'From 2001:db8::1 icmp_seq=1 Packet too big: mtu=1480', 'A router on the path has a smaller MTU and tells you the number. IPv6 routers never split packets.']] },
+        { cmd: 'tracepath -6 -n {target}', what: 'Finds the IPv6 path MTU hop by hop, without root.' },
+        { cmd: 'ip link show {iface}', what: 'Shows the interface MTU in the "mtu" field.' },
+      ],
+      route: [
+        { cmd: 'ip -6 route show', what: 'Lists IPv6 routes. "default via" lines are default gateways.' },
+        { cmd: 'ip -6 route get {target}', what: 'Shows the exact route, interface, and source address the kernel will use for {target}.' },
+        { cmd: 'traceroute -6 -n {target}', what: 'Lists each IPv6 router on the way.' },
+      ],
+      arp: [
+        { cmd: 'ip -6 neigh show', what: 'Lists the IPv6 neighbor cache with a state for each entry.',
+          out: [['ok', 'fe80::1 dev {iface} lladdr 00:11:22:33:44:55 router REACHABLE', 'The gateway answered recently. "router" means it sends router advertisements.'],
+                ['bad', '{gwplain} dev {iface} FAILED', 'No answer to neighbor discovery. That points to layer 2: the cable, switch port, VLAN, or Wi-Fi.']] },
+        { cmd: 'ndisc6 {gwplain} {iface}', what: 'Sends one neighbor solicitation, the IPv6 version of arping. Install the ndisc6 package first.' },
+        { cmd: 'rdisc6 {iface}', what: 'Asks the routers on the link for a router advertisement and prints the prefix and gateway they offer. Also in the ndisc6 package.' },
+        { cmd: 'sudo ip -6 neigh flush dev {iface}', what: 'Clears the IPv6 neighbor cache.' },
+      ],
+    },
+  };
+  const WS6_SIZE = [
+    ['icmpv6 && data.len == {payload}', 'Your IPv6 test pings with {payload} bytes of data.'],
+    ['ipv6.plen > 1400', 'Large packets. ipv6.plen is the payload length, not counting the 40-byte IPv6 header.'],
+    ['icmpv6.type == 2', '"Packet Too Big" messages. The icmpv6.mtu field shows the MTU of the next hop. IPv6 routers never split packets, so this is the only sign a packet was too big.'],
+    ['ipv6.nxt == 44', 'Fragments. In IPv6 only the sender splits packets, so these come from a host, not a router.'],
+    ['tcp.flags.syn == 1 && ipv6 && tcp.options.mss_val < 1440', 'IPv6 connections with a reduced MSS (normally 1440 on a 1500 MTU).'],
+    ['tcp.analysis.retransmission && tcp.len > 1300', 'Large segments being sent again, a typical sign of an MTU black hole.'],
+  ];
+  const WS6_ND = [
+    ['icmpv6.type == 135 && icmpv6.nd.ns.target_address == {gwplain}', 'Neighbor solicitations for the gateway, the IPv6 version of "who has". With no matching advertisement, the gateway isn\'t answering.'],
+    ['icmpv6.type == 136', 'Neighbor advertisements: the answers, with the MAC.'],
+    ['icmpv6.type == 134', 'Router advertisements: routers announcing the prefix and themselves as gateway. None means no SLAAC address.'],
+    ['icmpv6.type == 133', 'Router solicitations: devices asking for a router advertisement.'],
+    ['icmpv6.type == 135 && ipv6.src == ::', 'Duplicate address detection: a device checking that an address is free before using it.'],
+    ['dhcpv6', 'DHCPv6, for networks that hand out IPv6 addresses that way.'],
+  ];
+
   const MARKS = { ok: '✓', bad: '✕', warn: '!', info: 'i' };
   const MARK_WORDS = { ok: 'Pass', bad: 'Fail', warn: 'Warning', info: 'Note' };
   const fill = (tpl, v) => tpl.replace(/\{(\w+)\}/g, (all, k) => (v[k] !== undefined ? v[k] : all));
@@ -1131,6 +1597,7 @@ Wireless LAN adapter Wi-Fi:
     const st = {
       os: ['windows', 'macos', 'linux'].includes(saved.os) ? saved.os : 'windows',
       target: typeof saved.target === 'string' ? saved.target : '8.8.8.8',
+      target6: typeof saved.target6 === 'string' ? saved.target6 : '2001:4860:4860::8888',
       ifaceWin: typeof saved.ifaceWin === 'string' ? saved.ifaceWin : 'Ethernet',
       ifaceMac: typeof saved.ifaceMac === 'string' ? saved.ifaceMac : 'en0',
       ifaceLinux: typeof saved.ifaceLinux === 'string' ? saved.ifaceLinux : 'eth0',
@@ -1140,8 +1607,33 @@ Wireless LAN adapter Wi-Fi:
     const IFACE_KEY = { windows: 'ifaceWin', macos: 'ifaceMac', linux: 'ifaceLinux' };
     const ifaceOf = () => st[IFACE_KEY[st.os]];
 
+    const is6 = () => !!readAddress6($('ck-ip').value);
+
+    function values6() {
+      const r6 = readAddress6($('ck-ip').value), g6 = readAddress6($('ck-gw').value);
+      const mtu = Number(st.mtu.trim());
+      const okMtu = st.mtu.trim() !== '' && Number.isInteger(mtu) && mtu >= 68 && mtu <= 65535;
+      const iface = ifaceOf().trim();
+      // A link-local gateway only means something with its interface: %index on Windows, %name elsewhere.
+      const zone = g6 && g6.zone ? g6.zone : st.os === 'windows' ? '<index>' : (iface || '<interface>');
+      const gwplain = g6 ? fmt6(g6.n) : '<gateway>';
+      return {
+        v6: true,
+        ip: r6 ? fmt6(r6.n) : '<device-ip>',
+        gwplain,
+        gw: g6 && isLL6(g6.n) ? `${gwplain}%${zone}` : gwplain,
+        target: st.target6.trim() || '<target>',
+        iface: iface || '<interface>',
+        mtu: okMtu ? String(mtu) : '<mtu>',
+        payload: okMtu ? String(mtu - 48) : '<size>',
+        payload8: okMtu ? String(mtu - 40) : '<size>',
+        okMtu,
+      };
+    }
+
     function values() {
-      const ip = parseIP($('ck-ip').value), gw = parseIP($('ck-gw').value);
+      if (is6()) return values6();
+      const ip = parseIP(readAddress($('ck-ip').value).ip), gw = parseIP(readAddress($('ck-gw').value).ip);
       const mk = parseMask($('ck-mask').value);
       const mtu = Number(st.mtu.trim());
       const okMtu = st.mtu.trim() !== '' && Number.isInteger(mtu) && mtu >= 68 && mtu <= 65535;
@@ -1161,28 +1653,35 @@ Wireless LAN adapter Wi-Fi:
 
     function render() {
       const v = values();
-      const set = TESTS[st.os];
+      const set = (v.v6 ? TESTS6 : TESTS)[st.os];
+      if (targetEl !== document.activeElement) targetEl.value = v.v6 ? st.target6 : st.target;
+      targetEl.placeholder = v.v6 ? '2001:4860:4860::8888' : '8.8.8.8';
+      $('ts-family').textContent = v.v6 ? 'IPv6 commands, because the device address is IPv6.' : 'IPv4 commands. Enter an IPv6 device address above for IPv6 commands.';
+      $('ts-arp-title').textContent = v.v6 ? 'Neighbor discovery (IPv6)' : 'ARP';
+      $('ts-arp-cap').textContent = v.v6
+        ? "IPv6 has no ARP. Neighbor discovery (ICMPv6) does the same job and also finds routers. If the gateway has no neighbor entry, the problem is at layer 2: the cable, switch port, VLAN, or Wi-Fi."
+        : 'ARP finds the MAC address that goes with an IP on the local link. If the gateway has no ARP entry, the problem is at layer 2: the cable, switch port, VLAN, or Wi-Fi. ARP also exposes duplicate IP addresses.';
       $('ts-reach').innerHTML = set.reach.map((t) => cmdHTML(t, v)).join('');
       $('ts-mtu-cmds').innerHTML = set.mtu.map((t) => cmdHTML(t, v)).join('');
       $('ts-route').innerHTML = set.route.map((t) => cmdHTML(t, v)).join('');
       $('ts-arp').innerHTML = set.arp.map((t) => cmdHTML(t, v)).join('');
-      $('ts-ws-size').innerHTML = WS_SIZE.map(([cmd, what]) => cmdHTML({ cmd, what }, v)).join('');
+      $('ts-ws-size').innerHTML = (v.v6 ? WS6_SIZE : WS_SIZE).map(([cmd, what]) => cmdHTML({ cmd, what }, v)).join('');
       $('ts-offload').innerHTML = cmdHTML(OFFLOAD[st.os], v);
-      $('ts-ws-arp').innerHTML = WS_ARP.map(([cmd, what]) => cmdHTML({ cmd, what }, v)).join('');
+      $('ts-ws-arp').innerHTML = (v.v6 ? WS6_ND : WS_ARP).map(([cmd, what]) => cmdHTML({ cmd, what }, v)).join('');
       const big = !v.okMtu ? ''
         : st.os === 'windows' && Number(v.payload) > 65500 ? ' Windows ping sends at most 65,500 bytes of data, so it can\'t test an MTU above 65,528.'
         : st.os === 'macos' && Number(v.payload) > 8184 ? ' On macOS, data sizes this large may need sudo.'
         : '';
-      $('ts-mtu-calc').innerHTML = v.okMtu
-        ? `${v.mtu} MTU − 20 IP header − 8 ICMP header = <b>${v.payload}</b> bytes of ping data.${big}`
-        : 'Enter an MTU from 68 to 65535.';
+      $('ts-mtu-calc').innerHTML = !v.okMtu ? 'Enter an MTU from 68 to 65535.'
+        : v.v6 ? `${v.mtu} MTU − 40 IPv6 header − 8 ICMPv6 header = <b>${v.payload}</b> bytes of ping data.${Number(v.mtu) < 1280 ? ' IPv6 needs every link to carry at least 1280 bytes, so this MTU breaks IPv6.' : ' IPv6 routers never split packets: a packet that\'s too big is dropped with a Packet Too Big message.'}${big}`
+        : `${v.mtu} MTU − 20 IP header − 8 ICMP header = <b>${v.payload}</b> bytes of ping data.${big}`;
       document.querySelectorAll('#ts-mtu-presets [data-mtu]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mtu === st.mtu.trim())));
       store.set('tests', st);
     }
 
     function syncInputs() {
       $('ts-os-' + st.os).checked = true;
-      targetEl.value = st.target;
+      targetEl.value = is6() ? st.target6 : st.target;
       ifaceEl.value = ifaceOf();
       ifaceEl.placeholder = { windows: 'Ethernet or Wi-Fi', macos: 'en0', linux: 'eth0 or wlan0' }[st.os];
       mtuEl.value = st.mtu;
@@ -1193,7 +1692,7 @@ Wireless LAN adapter Wi-Fi:
       syncInputs();
       render();
     }));
-    targetEl.addEventListener('input', () => { st.target = targetEl.value; render(); });
+    targetEl.addEventListener('input', () => { if (is6()) st.target6 = targetEl.value; else st.target = targetEl.value; render(); });
     ifaceEl.addEventListener('input', () => { st[IFACE_KEY[st.os]] = ifaceEl.value; render(); });
     mtuEl.addEventListener('input', () => { st.mtu = mtuEl.value; render(); });
     const stepMtu = (d) => {
@@ -1288,12 +1787,14 @@ Wireless LAN adapter Wi-Fi:
         html = `<p class="calc">${base} − ${parts.map(([name, n]) => `${n} (${esc(name)})`).join(' − ')} = <b>${mtu}</b></p>` +
           `<dl class="kv">${kvRows([
             ['IP MTU left', `<b>${mtu}</b>`, String(mtu)],
-            ['Ping data size', String(mtu - 28), String(mtu - 28)],
-            ['TCP MSS', String(mtu - 40), String(mtu - 40)],
+            ['Ping data size (IPv4)', String(mtu - 28), String(mtu - 28)],
+            ['Ping data size (IPv6)', String(mtu - 48), String(mtu - 48)],
+            ['TCP MSS (IPv4)', String(mtu - 40), String(mtu - 40)],
+            ['TCP MSS (IPv6)', String(mtu - 60), String(mtu - 60)],
             ['Total overhead', `${total} bytes`, null],
           ])}</dl>`;
         if (gre || mode) {
-          html += cmdHTML({ cmd: `interface Tunnel0\n ip mtu ${mtu}\n ip tcp adjust-mss ${mtu - 40}`, tag: 'Cisco IOS',
+          html += cmdHTML({ cmd: `interface Tunnel0\n ip mtu ${mtu}\n ip tcp adjust-mss ${mtu - 40}` + (mtu >= 1280 ? `\n ipv6 mtu ${mtu}\n ipv6 tcp adjust-mss ${mtu - 60}` : ''), tag: 'Cisco IOS',
             what: "Sets the tunnel's IP MTU and clamps TCP so hosts never send more than fits. Cisco's usual DMVPN values, 1400 and 1360, leave a little extra room." }, {});
         }
         if (mpls) {
@@ -1471,6 +1972,31 @@ Wireless LAN adapter Wi-Fi:
     },
   };
 
+  // Reaching a device over IPv6 from each laptop.
+  const FIND6 = {
+    windows: {
+      set: { cmd: 'netsh interface ipv6 add address "{iface}" {laptop}/{prefix}', tag: 'Run as administrator', what: 'Adds {laptop} to the wired connection, alongside its link-local address. Windows checks that no one else is using it first (duplicate address detection).' },
+      connect: { cmd: 'ping -n 4 {ip}', what: 'Then open http://[{ip}]/ in a browser. The square brackets are required around an IPv6 address.' },
+      undo: { cmd: 'netsh interface ipv6 delete address "{iface}" {laptop}', tag: 'Run as administrator', what: 'Removes the temporary address.' },
+      pingLL: { cmd: 'ping -n 4 {ip}%{idx}', what: 'The %{idx} tells Windows which interface to use. Every link has fe80:: addresses, so a link-local address always needs one.' },
+      sshLL: { cmd: 'ssh admin@{ip}%{idx}', what: "Opens a session over link-local. Browsers can't open link-local addresses, so for a web page use SSH, the maker's tool, or find the device's other address (its LLDP or the Scan tab)." },
+    },
+    macos: {
+      set: { cmd: 'sudo ifconfig {iface} inet6 {laptop} prefixlen {prefix} alias', what: 'Adds {laptop} alongside your current addresses until you remove it or restart. macOS checks that no one else is using it first.' },
+      connect: { cmd: 'ping6 -c 4 {ip}', what: 'Then open http://[{ip}]/ in a browser. The square brackets are required around an IPv6 address.' },
+      undo: { cmd: 'sudo ifconfig {iface} inet6 {laptop} -alias', what: 'Removes the temporary address.' },
+      pingLL: { cmd: 'ping6 -c 4 {ip}%{iface}', what: 'The %{iface} tells macOS which interface to use. Every link has fe80:: addresses, so a link-local address always needs one.' },
+      sshLL: { cmd: 'ssh admin@{ip}%{iface}', what: "Opens a session over link-local. Browsers can't open link-local addresses, so for a web page use SSH, the maker's tool, or find the device's other address." },
+    },
+    linux: {
+      set: { cmd: 'sudo ip -6 addr add {laptop}/{prefix} dev {iface}', what: 'Adds {laptop} alongside your current addresses. Linux checks that no one else is using it first.' },
+      connect: { cmd: 'ping -6 -c 4 {ip}', what: 'Then open http://[{ip}]/ in a browser. The square brackets are required around an IPv6 address.' },
+      undo: { cmd: 'sudo ip -6 addr del {laptop}/{prefix} dev {iface}', what: 'Removes the temporary address.' },
+      pingLL: { cmd: 'ping -6 -c 4 {ip}%{iface}', what: 'The %{iface} tells Linux which interface to use. Every link has fe80:: addresses, so a link-local address always needs one.' },
+      sshLL: { cmd: 'ssh admin@{ip}%{iface}', what: "Opens a session over link-local. Browsers can't open link-local addresses, so for a web page use SSH, the maker's tool, or find the device's other address." },
+    },
+  };
+
   function initFind() {
     const OSES = ['windows', 'macos', 'linux'];
     const saved = store.get('find', {}) || {};
@@ -1494,17 +2020,6 @@ Wireless LAN adapter Wi-Fi:
 
     function values() {
       const errs = [];
-      const ipR = readAddress(st.ip);
-      const ipN = parseIP(ipR.ip);
-      if (st.ip.trim() && ipN === null) errs.push(ipR.v6 ? "That's an IPv6 address. Enter the device's IPv4 address here, or use the IPv6 steps in step 4." : `"${st.ip.trim()}" isn't a complete IPv4 address.`);
-      // A prefix typed with the IP ("192.168.1.64/24") counts when the Prefix box is empty.
-      const mk = parseMask(st.prefix.trim() !== '' ? st.prefix : (ipR.mask || ''));
-      let p = null, guessed = false;
-      if (mk.p !== undefined) p = mk.p;
-      else if (mk.empty) { if (ipN !== null) { p = 24; guessed = true; } }
-      else errs.push(mk.error);
-      const apipa = ipN !== null && netOf(ipN, 16) === parseIP('169.254.0.0');
-      if (apipa) { p = 16; guessed = false; }
       const macText = st.mac.trim();
       const mac = normMac(macText);
       if (macText && !mac) errs.push(`"${macText}" isn't a MAC address. Use 12 hex digits, like 00:11:22:33:44:55.`);
@@ -1514,6 +2029,49 @@ Wireless LAN adapter Wi-Fi:
       const iface = st.iface[st.os].trim();
       const idx = st.idx.trim();
       if (st.os === 'windows' && idx && !/^\d+$/.test(idx)) errs.push('The interface index is a number from the Idx column, like 12.');
+      const common = {
+        errs, macOk: !!mac, ifaceOk: !!iface,
+        mac: mac || '<mac>',
+        ll: mac ? eui64(mac) : '<fe80-address>',
+        iface: iface || '<interface>',
+        idx: /^\d+$/.test(idx) ? idx : '<index>',
+        net3: net3 || '<a.b.c>',
+      };
+
+      const r6 = readAddress6(st.ip);
+      if (r6) {
+        const sp = classify6(r6.n), linkLocal = isLL6(r6.n);
+        const pm = st.prefix.trim() !== '' ? parsePrefix6(st.prefix) : r6.prefix !== null ? { p: r6.prefix } : { empty: true };
+        let p = 64, guessed = false;
+        if (pm.error) errs.push(pm.error);
+        else if (pm.empty) guessed = !linkLocal;
+        else p = pm.p;
+        const devWarn = sp.dev === 'bad' ? `${fmt6(r6.n)} is ${sp.label === 'Multicast' ? 'a multicast' : `a ${sp.label}`} address, not a device address. Check what you found.` : '';
+        let laptop = null;
+        if (!linkLocal && !devWarn) {
+          if (p === 127) laptop = r6.n ^ 1n;
+          else if (p < 127) {
+            const base = net6(r6.n, p);
+            laptop = base | 0x250n;
+            if (laptop > last6(r6.n, p) || laptop === r6.n) laptop = base | 2n;
+            if (laptop === r6.n) laptop = base | 3n;
+          }
+        }
+        return { ...common, v6: true, linkLocal, ipN: r6.n, p, guessed, devWarn, apipa: false, laptopN: laptop,
+          ip: fmt6(r6.n), prefix: String(p), mask: '/' + p, laptop: laptop !== null ? fmt6(laptop) : '<laptop-ip>' };
+      }
+
+      const ipR = readAddress(st.ip);
+      const ipN = parseIP(ipR.ip);
+      if (st.ip.trim() && ipN === null) errs.push(`"${st.ip.trim()}" isn't a complete IPv4 or IPv6 address.`);
+      // A prefix typed with the IP ("192.168.1.64/24") counts when the Prefix box is empty.
+      const mk = parseMask(st.prefix.trim() !== '' ? st.prefix : (ipR.mask || ''));
+      let p = null, guessed = false;
+      if (mk.p !== undefined) p = mk.p;
+      else if (mk.empty) { if (ipN !== null) { p = 24; guessed = true; } }
+      else errs.push(mk.error);
+      const apipa = ipN !== null && netOf(ipN, 16) === parseIP('169.254.0.0');
+      if (apipa) { p = 16; guessed = false; }
       // Link-local reserves 169.254.0.x and 169.254.255.x, so never suggest a laptop address there.
       const apipaNear = (n) => ([0, 255].includes(octets(n)[2]) ? parseIP('169.254.1.1') : n);
       const laptop = ipN !== null && p !== null ? (apipa ? laptopAddress(apipaNear(ipN), 24) : laptopAddress(ipN, p)) : null;
@@ -1525,16 +2083,11 @@ Wireless LAN adapter Wi-Fi:
         else if (p !== null && p <= 30 && !apipa && (ipN === net || ipN === net + P2(32 - p) - 1)) devWarn = `${ipStr(ipN)} is the ${ipN === net ? 'network' : 'broadcast'} address of a /${p}, so it can't be the device. Check the address or the prefix.`;
       }
       return {
-        errs, ipN, p, guessed, apipa, devWarn, laptopN: laptop, macOk: !!mac, ifaceOk: !!iface,
+        ...common, v6: false, ipN, p, guessed, apipa, devWarn, laptopN: laptop,
         ip: ipN !== null ? ipStr(ipN) : '<device-ip>',
         prefix: p !== null ? String(p) : '<prefix>',
         mask: p !== null ? maskStr(p) : '<mask>',
         laptop: laptop !== null ? ipStr(laptop) : '<laptop-ip>',
-        mac: mac || '<mac>',
-        ll: mac ? eui64(mac) : '<fe80-address>',
-        iface: iface || '<interface>',
-        idx: /^\d+$/.test(idx) ? idx : '<index>',
-        net3: net3 || '<a.b.c>',
       };
     }
 
@@ -1560,16 +2113,24 @@ Wireless LAN adapter Wi-Fi:
       const sug = $('fd-suggest');
       if (v.devWarn) sug.innerHTML = `<b>Check this:</b> ${esc(v.devWarn)}`;
       else if (v.ipN === null) sug.textContent = "Enter the device's IP in any \"Found it?\" box first. The commands below fill in from it.";
+      else if (v.v6 && v.linkLocal) sug.innerHTML = `${esc(v.ip)} is link-local, so you can reach it straight from your laptop with no address setup. Add your wired interface after a %, as in the commands below.`;
+      else if (v.v6 && v.laptopN === null) sug.textContent = `A /${v.p} has no room for your laptop. Check the prefix.`;
+      else if (v.v6) sug.innerHTML = `Use <b>${esc(v.laptop)}/${v.p}</b> for your laptop. It's in the same prefix as ${esc(v.ip)}${v.guessed ? ', assuming a /64' : ''}.`;
       else if (v.apipa) sug.innerHTML = `${esc(v.ip)} is a link-local (APIPA) address. Your laptop can join it at <b>${esc(v.laptop)}/16</b>, or see the first shortcut below.`;
       else if (v.laptopN === null) sug.textContent = `A /${v.p} has no room for a second address. Check the prefix.`;
       else sug.innerHTML = `Use <b>${esc(v.laptop)}/${v.p}</b> (mask ${esc(v.mask)}) for your laptop. It's in the same subnet as ${esc(v.ip)}${v.guessed ? ', assuming a /24' : ''}.`;
 
-      $('fd-connect').innerHTML = [
-        ["Check that your laptop's address is free", F.free],
-        ['Give your laptop the address', F.set],
-        ['Connect', F.connect],
-        ['Undo it when you finish', F.undo],
-      ].map(([title, t]) => `<li><h3>${esc(title)}</h3><div class="step-body">${item(t, v)}</div></li>`).join('');
+      const F6 = FIND6[st.os];
+      $('fd-connect').innerHTML = (v.v6
+        ? (v.linkLocal
+          ? [['Reach it over link-local', F6.pingLL], ['Open a session', F6.sshLL]]
+          : [['Give your laptop an address in its prefix', F6.set], ['Connect', F6.connect], ['Undo it when you finish', F6.undo]])
+        : [
+          ["Check that your laptop's address is free", F.free],
+          ['Give your laptop the address', F.set],
+          ['Connect', F.connect],
+          ['Undo it when you finish', F.undo],
+        ]).map(([title, t]) => `<li><h3>${esc(title)}</h3><div class="step-body">${item(t, v)}</div></li>`).join('');
 
       $('fd-shortcuts').innerHTML =
         '<p>If the device has a 169.254 address, leave your laptop on DHCP with no DHCP server connected. After about a minute it gives itself a 169.254 address too, and both land in the same /16.</p>' +
@@ -1579,8 +2140,8 @@ Wireless LAN adapter Wi-Fi:
       $('fd-known').innerHTML = kvRows([
         ['Wired interface', known(v.ifaceOk, v.iface + (st.os === 'windows' && st.idx.trim() ? ` (index ${st.idx.trim()})` : ''), 'Not set yet, see step 1'), null],
         ['Device MAC', known(v.macOk, v.mac, 'Not found yet'), null],
-        ['Device IP', known(v.ipN !== null, `${v.ip}/${v.prefix}${v.guessed ? ' (prefix guessed)' : ''}`, 'Not found yet'), null],
-        ['Your laptop', known(v.laptopN !== null, `${v.laptop}/${v.prefix}`, 'Set once the device IP is known'), null],
+        ['Device IP', known(v.ipN !== null, v.v6 && v.linkLocal ? `${v.ip} (link-local)` : `${v.ip}/${v.prefix}${v.guessed ? ' (prefix guessed)' : ''}`, 'Not found yet'), null],
+        ['Your laptop', v.v6 && v.linkLocal ? '<span class="muted">No setup needed for link-local</span>' : known(v.laptopN !== null, `${v.laptop}/${v.prefix}`, 'Set once the device IP is known'), null],
       ]);
       view.querySelectorAll('[data-fill]').forEach((el) => { el.textContent = v[el.dataset.fill]; });
       view.querySelectorAll('.fd-err').forEach((el) => { el.hidden = !v.errs.length; el.textContent = v.errs.join(' '); });
@@ -1626,7 +2187,8 @@ Wireless LAN adapter Wi-Fi:
   // ---------- Subnet solver ----------
   function initSolver() {
     const MIN_P = 8, MAX_P = 30, PAGE = 8, STEP = 16;
-    const state = { ip: '172.16.0.0', prefix: 16, mode: 'subnets', needSubnets: 50, needHosts: 500, shown: PAGE };
+    const state = { fam: '4', ip: '172.16.0.0', prefix: 16, mode: 'subnets', needSubnets: 50, needHosts: 500, shown: PAGE };
+    const state6 = { net: '2001:db8:abcd::/48', need: 16, shown: PAGE };
     const s = store.get('solver', null);
     if (s && typeof s === 'object') {
       if (typeof s.ip === 'string') state.ip = s.ip;
@@ -1634,8 +2196,11 @@ Wireless LAN adapter Wi-Fi:
       if (s.mode === 'subnets' || s.mode === 'hosts') state.mode = s.mode;
       if (Number.isInteger(s.needSubnets) && s.needSubnets > 0) state.needSubnets = s.needSubnets;
       if (Number.isInteger(s.needHosts) && s.needHosts > 0) state.needHosts = s.needHosts;
+      if (s.fam === '4' || s.fam === '6') state.fam = s.fam;
+      if (typeof s.net6 === 'string') state6.net = s.net6;
+      if (Number.isInteger(s.need6) && s.need6 > 0) state6.need = s.need6;
     }
-    const save = () => store.set('solver', { ip: state.ip, prefix: state.prefix, mode: state.mode, needSubnets: state.needSubnets, needHosts: state.needHosts });
+    const save = () => store.set('solver', { fam: state.fam, ip: state.ip, prefix: state.prefix, mode: state.mode, needSubnets: state.needSubnets, needHosts: state.needHosts, net6: state6.net, need6: state6.need });
 
     const maskOctets = (p) => [0, 1, 2, 3].map((i) => 256 - P2(8 - Math.max(0, Math.min(8, p - 8 * i))));
     function octetOf(p) {
@@ -1927,16 +2492,178 @@ Wireless LAN adapter Wi-Fi:
     });
     $('sv-more').addEventListener('click', () => { state.shown += STEP; render(); });
 
+    // ---------- IPv6 subnetting ----------
+    function compute6() {
+      const txt = state6.net.trim();
+      const r6 = readAddress6(txt);
+      if (!r6) return { error: txt ? `"${txt}" isn't an IPv6 prefix. Enter it like 2001:db8:abcd::/48.` : 'Enter the IPv6 network, like 2001:db8:abcd::/48.' };
+      if (r6.prefix === null) return { error: 'Add the prefix length after a slash, like 2001:db8:abcd::/48.' };
+      const base = r6.prefix;
+      if (base < 8 || base > 124) return { error: 'Use a network prefix from /8 to /124.' };
+      const S = state6.need;
+      if (!(Number.isInteger(S) && S >= 1)) return { error: 'Enter how many subnets you need, as a whole number of 1 or more.' };
+      let n = 0;
+      while ((1n << B(n)) < B(S)) n++;
+      const p = base + n;
+      if (p > 128) return { error: `Borrowing ${n} bits from /${base} gives /${p}, but an IPv6 address only has 128 bits. A /${base} can make at most ${big(1n << B(128 - base))} subnets.` };
+      const net = net6(r6.n, base);
+      return {
+        base, n, p, need: S, net, input: r6.n, adjusted: net !== r6.n,
+        subnets: 1n << B(n), size: 1n << B(128 - p),
+        k: Math.floor((p - 1) / 16),          // hextet holding the last subnet bit
+        inc: 1 << (15 - ((p - 1) % 16)),      // that bit's value within the hextet
+        pn: Math.min(128, Math.ceil(p / 4) * 4), // next nibble boundary
+      };
+    }
+
+    // Write a prefix with its changing hextet in full, so subnet IDs line up: 2001:db8:abcd:1000::/52.
+    function prefix6(n, k, p, bold) {
+      const h = hextets(n);
+      const head = h.slice(0, k + 1).map((x, i) => {
+        if (i !== k) return x.toString(16);
+        const d = x.toString(16).padStart(4, '0');
+        return bold ? `<b>${d}</b>` : d;
+      });
+      const rest = h.slice(k + 1);
+      const tail = rest.length === 0 ? '' : rest.every((x) => x === 0) ? '::' : ':' + rest.map((x) => x.toString(16)).join(':');
+      return `${head.join(':')}${tail}/${p}`;
+    }
+
+    function ladder6(r) {
+      const start = Math.max(0, r.n - 4);
+      let html = start > 0 ? '<li class="rung skip" aria-hidden="true">…</li>' : '';
+      for (let i = start; i <= r.n; i++) {
+        const v = 1n << B(i), ok = v >= B(r.need);
+        html += `<li class="rung ${ok ? 'ok' : 'low'}"><span class="eq">${pow(2, i)} = ${big(v)}</span><span class="tag">${ok ? 'Enough' : 'Too few'}</span></li>`;
+      }
+      return `<ul class="ladder">${html}</ul>`;
+    }
+
+    function steps6(r) {
+      const steps = [];
+      const hx = '0x' + r.inc.toString(16);
+      steps.push(['Find how many bits to borrow', `<p>Same rule as IPv4: borrowing <var>n</var> bits makes ${pow(2, '<var>n</var>')} subnets. Find the smallest <var>n</var> where ${pow(2, '<var>n</var>')} ≥ ${fmt(r.need)}.</p>${ladder6(r)}<p>Borrow <b>${pl(r.n, 'bit')}</b>.</p>`]);
+      steps.push(['Add them to the prefix', `<p class="calc">/${r.base} + ${r.n} = <b>/${r.p}</b></p>`]);
+      steps.push(['Check the nibble boundary', r.p % 4 === 0
+        ? `<p>Each hex digit is 4 bits (a nibble). /${r.p} is a multiple of 4, so every subnet differs in whole hex digits, which keeps the addresses easy to read.</p>`
+        : `<p>Each hex digit is 4 bits (a nibble). /${r.p} isn't a multiple of 4, so one hex digit is split between the subnet ID and the rest. Many networks round up to <b>/${r.pn}</b>: that gives ${big(1n << B(r.pn - r.base))} subnets, still enough for ${fmt(r.need)}, and every subnet starts on a whole hex digit.</p>`]);
+      const second = r.subnets > 1n ? r.net + r.size : r.net;
+      steps.push(['See it in hex', `<p>This is subnet ${r.subnets > 1n ? 2 : 1}, ${esc(prefix6(second, r.k, r.p, false))}. Blue digits are the network you were given, orange digits are the subnet ID you add, and green digits are left for hosts.</p>${nibbles6(second, r.p, r.base)}`]);
+      const ex = [0n, 1n, 2n].filter((i) => i < r.subnets).map((i) => prefix6(r.net + i * r.size, r.k, r.p, true));
+      steps.push(['Find the increment', `<p>The last subnet bit is bit ${r.p} of 128. It sits in the ${ORD6[r.k]} hextet, where it's worth <b>${hx}</b> (${fmt(r.inc)}). Each new subnet adds ${hx} to the ${ORD6[r.k]} hextet:</p><p class="calc">${ex.join(', ')}${r.subnets > 3n ? ', …' : ''}</p>`]);
+      steps.push(['Count subnets and sizes',
+        `<p class="calc">Subnets = ${pow(2, r.n)} = <b>${big(r.subnets)}</b><span class="aside">need ${fmt(r.need)}, ${big(r.subnets - B(r.need))} spare</span></p>` +
+        (r.p <= 64
+          ? `<p class="calc">Each /${r.p} holds ${pow(2, 64 - r.p)} = <b>${big(1n << B(64 - r.p))}</b> /64 subnets</p>`
+          : `<p class="calc">Each /${r.p} holds ${pow(2, 128 - r.p)} = <b>${big(r.size)}</b> addresses</p><p>Subnets longer than /64 can't use SLAAC, so they suit point-to-point links (/127) and single addresses (/128), not LANs.</p>`)]);
+      steps.push(['Find it in the table', `<p>Go down the IPv6 table from /${r.base} until <i># of subnets</i> reaches ${fmt(r.need)}. The first row that does is <b>/${r.p}</b>${r.pn !== r.p ? `, and the shaded /${r.pn} row is the nibble-boundary choice` : ''}.</p>`]);
+      return steps.map(([t, b]) => `<li><h3>${t}</h3><div class="step-body">${b}</div></li>`).join('');
+    }
+
+    function renderTable6(r) {
+      const top = Math.min(128, Math.max(64, r.pn));
+      const rows = [];
+      for (let q = r.base; q <= top && rows.length < 40; q++) if (q === r.base || q === r.p || q === r.pn || q % 4 === 0) rows.push(q);
+      $('sv6-table-title').textContent = `IPv6 subnet sizes · ${fmt6(r.net)}/${r.base}`;
+      let html = '<thead><tr><th scope="col">Prefix</th><th scope="col">Borrowed bits</th><th scope="col"># of subnets</th><th scope="col">Size of each</th></tr></thead><tbody>';
+      for (const q of rows) {
+        const size = q <= 64 ? `${big(1n << B(64 - q))} × /64` : `${big(1n << B(128 - q))} addresses`;
+        const cls = q === r.p ? ' class="row-hi"' : q === r.pn ? ' class="row-alt"' : '';
+        html += `<tr${cls}><td>/${q}</td><td>NET + ${q - r.base}</td><td>${big(1n << B(q - r.base))}</td><td>${size}</td></tr>`;
+      }
+      $('sv6-table').innerHTML = html + '</tbody>';
+    }
+
+    function renderList6(r) {
+      const total = r.subnets;
+      const want = B(state6.shown);
+      const lim = total < want ? total : want;
+      const row = (i) => {
+        const a = r.net + i * r.size;
+        return `<div class="srow"><span class="idx">${big(i + 1n)}</span><span class="net">${prefix6(a, r.k, r.p, true)}</span><span class="bc"></span><span class="rng">${fmt6(a)} – ${fmt6(a + r.size - 1n)}</span></div>`;
+      };
+      let html = '<div class="srow hdr"><span class="idx">#</span><span class="net">Prefix</span><span class="bc"></span><span class="rng">Address range</span></div>';
+      for (let i = 0n; i < lim; i++) html += row(i);
+      const left = total - lim - 1n;
+      if (lim < total) {
+        if (left > 0n) html += `<div class="sgap">${big(left)} more ${left === 1n ? 'subnet' : 'subnets'}</div>`;
+        html += row(total - 1n);
+      }
+      $('sv6-list').innerHTML = html;
+      $('sv6-list-cap').textContent = `${big(total)} ${total === 1n ? 'subnet' : 'subnets'}. The bold hextet counts up by 0x${r.inc.toString(16)}.`;
+      const more = $('sv6-more');
+      more.hidden = left <= 0n;
+      more.textContent = `Show ${big(left < 16n ? left : 16n)} more`;
+    }
+
+    function render6() {
+      const r = compute6();
+      const ok = !r.error;
+      $('sv6-error').hidden = ok;
+      if (!ok) $('sv6-error').textContent = r.error;
+      ['sv6-answer', 'sv6-math', 'sv6-table-sec', 'sv6-list-sec'].forEach((id) => { $(id).hidden = !ok; });
+      const note = $('sv6-note');
+      note.hidden = !(ok && r.adjusted);
+      if (!note.hidden) note.innerHTML = `${esc(fmt6(r.input))} has bits set past /${r.base}. Using the network prefix, <b>${esc(fmt6(r.net))}/${r.base}</b>.`;
+      if (!ok) return;
+      $('sv6-answer-line').innerHTML = `To get ${pl(r.need, 'subnet')} from <b>${esc(fmt6(r.net))}/${r.base}</b>, borrow <b>${pl(r.n, 'bit')}</b> for a <b>/${r.p}</b> prefix.${r.pn !== r.p ? ` On a nibble boundary, that's <b>/${r.pn}</b>.` : ''}`;
+      const each = r.p <= 64 ? ['/64s per subnet', big(1n << B(64 - r.p))] : ['Addresses each', big(r.size)];
+      const items = [
+        ['New prefix', '/' + r.p, r.pn !== r.p ? `or /${r.pn} on a nibble` : '', 'key'],
+        ['Borrowed bits', String(r.n), '', ''],
+        ['Subnets', big(r.subnets), 'need ' + fmt(r.need), 'key'],
+        [each[0], each[1], '', ''],
+        ['First subnet', prefix6(r.net, r.k, r.p, false), '', 'wide'],
+        ['Steps by', '0x' + r.inc.toString(16), `in the ${ORD6[r.k]} hextet`, 'wide'],
+      ];
+      $('sv6-stats').innerHTML = items.map(([label, val, sub, cls]) =>
+        `<div class="stat ${cls}"><dt>${label}</dt><dd>${val}</dd>${sub ? `<dd class="sub">${sub}</dd>` : ''}</div>`
+      ).join('');
+      $('sv6-steps').innerHTML = steps6(r);
+      renderTable6(r);
+      renderList6(r);
+    }
+
+    function syncFamily() {
+      $('sv-fam-' + state.fam).checked = true;
+      ['sv4-in', 'sv4-out'].forEach((id) => { $(id).hidden = state.fam !== '4'; });
+      ['sv6-in', 'sv6-out'].forEach((id) => { $(id).hidden = state.fam !== '6'; });
+      const n6 = $('sv6-net'), d6 = $('sv6-need');
+      if (n6 !== document.activeElement) n6.value = state6.net;
+      if (d6 !== document.activeElement) d6.value = Number.isFinite(state6.need) ? String(state6.need) : '';
+    }
+    const renderAll = () => (state.fam === '6' ? render6() : render());
+
+    document.querySelectorAll('input[name="sv-fam"]').forEach((el) => el.addEventListener('change', () => { state.fam = el.value; syncFamily(); renderAll(); save(); }));
+    $('sv6-net').addEventListener('input', () => { state6.net = $('sv6-net').value; state6.shown = PAGE; render6(); save(); });
+    $('sv6-need').addEventListener('input', () => {
+      const v = $('sv6-need').value.trim() === '' ? NaN : Number($('sv6-need').value);
+      state6.need = v; state6.shown = PAGE; render6(); save();
+    });
+    document.querySelectorAll('[data-net6]').forEach((b) => b.addEventListener('click', () => { state6.net = b.dataset.net6; state6.shown = PAGE; syncFamily(); render6(); save(); }));
+    $('sv6-more').addEventListener('click', () => { state6.shown += STEP; render6(); });
+
     syncInputs();
-    render();
+    syncFamily();
+    renderAll();
 
     return {
-      render,
+      render: renderAll,
       setNetwork(ip, prefix) {
+        state.fam = '4';
         state.ip = ip;
         state.prefix = Math.max(MIN_P, Math.min(MAX_P, prefix));
         syncInputs();
+        syncFamily();
         update();
+      },
+      setNetwork6(text) {
+        state.fam = '6';
+        state6.net = text;
+        state6.shown = PAGE;
+        syncFamily();
+        render6();
+        save();
       },
     };
   }
