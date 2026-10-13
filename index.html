@@ -386,6 +386,32 @@ table.ref { border-collapse: collapse; width: 100%; font: 400 13px/1.3 var(--fon
 }
 .notes { list-style: none; margin: 0; padding: 16px 0 0; display: grid; gap: 8px; font-size: 13.5px; color: var(--muted); max-width: 66ch; border-top: 1px solid var(--line); }
 
+/* Device tests */
+.tbody { display: grid; gap: 20px; min-width: 0; }
+.tbody > p { margin: 0; max-width: 64ch; }
+.cmd { display: grid; gap: 8px; min-width: 0; }
+.cmd + .cmd { padding-top: 18px; border-top: 1px solid var(--line); }
+.cmd-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
+.cmd-line code {
+  display: block;
+  font: 500 14.5px/1.45 var(--font-mono);
+  background: var(--hl);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cmd .what { margin: 0; font-size: 14.5px; max-width: 64ch; }
+.cmd .what .badge { margin-right: 6px; vertical-align: 1px; }
+.outs { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.outs li { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; align-items: start; }
+.outs .mark { width: 22px; height: 22px; font-size: 12px; }
+.outs code { display: block; font: 400 13px/1.4 var(--font-mono); overflow-wrap: anywhere; }
+.outs p { margin: 2px 0 0; font-size: 13.5px; color: var(--muted); }
+.chip[aria-pressed="true"] { border-color: var(--borrow); background: var(--borrow-tint); color: var(--borrow); }
+details.tests > summary { font: 600 1.05rem/1.3 var(--font-body); }
+
 /* Scan */
 .filebtn { position: relative; overflow: hidden; display: inline-block; }
 .filebtn input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
@@ -603,7 +629,7 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
   <div id="view-check" class="view" hidden>
     <header class="vhead">
       <h1>Device check</h1>
-      <p class="lede">Enter a device's IP settings to catch a wrong mask, a gateway outside the subnet, or a failed DHCP lease.</p>
+      <p class="lede">Enter a device's IP settings to catch a wrong mask, a gateway outside the subnet, or a failed DHCP lease. Then run the tests below on the device.</p>
     </header>
 
     <section class="panel controls" aria-label="Device settings">
@@ -635,6 +661,78 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
       <span id="ck-verdict" class="verdict"></span>
       <ul id="ck-list" class="checklist panel"></ul>
       <dl class="kv panel" id="ck-subnet"></dl>
+    </section>
+
+    <section id="ts">
+      <h2 class="sec">Test it on the device</h2>
+      <p class="cap">The checks above only cover the settings. These commands test the real network. Run them on the device and compare what you get with the example output.</p>
+      <div class="panel controls">
+        <div class="seg" role="radiogroup" aria-label="Operating system">
+          <input type="radio" name="ts-os" id="ts-os-windows" value="windows"><label for="ts-os-windows">Windows</label>
+          <input type="radio" name="ts-os" id="ts-os-linux" value="linux"><label for="ts-os-linux">Linux</label>
+        </div>
+        <div class="row">
+          <div class="field grow">
+            <label for="ts-target">Remote target</label>
+            <input id="ts-target" type="text" inputmode="url" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="8.8.8.8">
+          </div>
+          <div class="field grow">
+            <label for="ts-iface">Interface name</label>
+            <input id="ts-iface" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+          </div>
+        </div>
+        <p class="cap">The device IP and gateway come from the fields at the top.</p>
+      </div>
+
+      <details class="panel tests" open>
+        <summary>Reachability, step by step</summary>
+        <div class="tbody">
+          <p class="cap">Work down the list. The first test that fails shows where the problem is.</p>
+          <div class="tbody" id="ts-reach"></div>
+        </div>
+      </details>
+
+      <details class="panel tests">
+        <summary>MTU and fragmentation</summary>
+        <div class="tbody">
+          <p class="cap">MTU is the largest packet a link carries. When a link on the path has a smaller MTU, big packets are split up or, with Don't Fragment set, dropped. Typical signs: ping works and small pages load, but large pages, HTTPS, VPNs, file copies, or remote desktop hang. Test to a host on the far side of the link you suspect, such as across the VPN.</p>
+          <div class="field">
+            <label for="ts-mtu">MTU to test</label>
+            <div class="stepper">
+              <button type="button" id="ts-mtu-dec" aria-label="Lower MTU by 1">−</button>
+              <input id="ts-mtu" type="text" inputmode="numeric" autocomplete="off">
+              <button type="button" id="ts-mtu-inc" aria-label="Raise MTU by 1">+</button>
+            </div>
+          </div>
+          <div class="presets" id="ts-mtu-presets">
+            <button type="button" class="chip text" data-mtu="1500">1500 Ethernet</button>
+            <button type="button" class="chip text" data-mtu="1492">1492 PPPoE / DSL</button>
+            <button type="button" class="chip text" data-mtu="1476">1476 GRE tunnel</button>
+            <button type="button" class="chip text" data-mtu="1450">1450 VXLAN</button>
+            <button type="button" class="chip text" data-mtu="1400">1400 Typical VPN</button>
+            <button type="button" class="chip text" data-mtu="9000">9000 Jumbo frames</button>
+          </div>
+          <p class="calc" id="ts-mtu-calc"></p>
+          <div class="tbody" id="ts-mtu-cmds"></div>
+          <p class="cap">To find the path MTU, start at 1500. If the test fails, lower the MTU by 10 until it passes, then raise it by 1 until it fails. The last MTU that passed is the path MTU. TCP's maximum segment size (MSS) is the MTU − 40.</p>
+        </div>
+      </details>
+
+      <details class="panel tests">
+        <summary>Routes</summary>
+        <div class="tbody">
+          <p class="cap">Use these when the gateway answers but places beyond it don't, or when traffic leaves through the wrong connection. That's common with VPNs, and with Wi-Fi and Ethernet connected at the same time.</p>
+          <div class="tbody" id="ts-route"></div>
+        </div>
+      </details>
+
+      <details class="panel tests">
+        <summary>ARP</summary>
+        <div class="tbody">
+          <p class="cap">ARP finds the MAC address that goes with an IP on the local link. If the gateway has no ARP entry, the problem is at layer 2: the cable, switch port, VLAN, or Wi-Fi. ARP also exposes duplicate IP addresses.</p>
+          <div class="tbody" id="ts-arp"></div>
+        </div>
+      </details>
     </section>
   </div>
 

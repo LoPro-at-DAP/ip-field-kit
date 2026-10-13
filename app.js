@@ -495,7 +495,7 @@
     };
   }
 
-  function initCheck() {
+  function initCheck(onChange) {
     const ipEl = $('ck-ip'), maskEl = $('ck-mask'), gwEl = $('ck-gw');
     const saved = store.get('check', { ip: '10.20.30.40', mask: '255.255.255.0', gw: '10.20.30.1' });
     ipEl.value = typeof saved.ip === 'string' ? saved.ip : '';
@@ -509,6 +509,7 @@
       if (r.error) $('ck-error').textContent = r.error;
       $('ck-out').hidden = !!r.error;
       store.set('check', { ip: ipEl.value, mask: maskEl.value, gw: gwEl.value });
+      if (onChange) onChange();
       if (r.error) return;
 
       const v = $('ck-verdict');
@@ -803,6 +804,200 @@ Wireless LAN adapter Wi-Fi:
     });
     $('sc-check').addEventListener('click', () => { if (found) check.load(found.ip, found.mask, found.gw); });
     update();
+  }
+
+  // ---------- Device tests ----------
+  // Commands to run on the device. {ip} {gw} {target} {iface} {mtu} {payload} {payload8} are filled in from the form.
+  // out: [state, example output, what it means]
+  const SHORT_REPLY = "Some servers, including 8.8.8.8, send back a trimmed reply to large pings. Any reply still means the full-size packet got through.";
+  const BLACK_HOLE = 'A black hole: a router drops the packet, and its "too big" message is blocked on the way back. Expect web pages and VPNs to hang.';
+  const TESTS = {
+    windows: {
+      reach: [
+        { cmd: 'ipconfig /all', what: 'Shows the IP, mask, gateway, DHCP server, and DNS servers. Photograph the output and use Scan to fill in the fields above.',
+          out: [['bad', 'IPv4 Address. . . : 169.254.12.34(Preferred)', 'No DHCP lease. Check the cable, the VLAN, and the DHCP server.'],
+                ['bad', 'IPv4 Address. . . : {ip}(Duplicate)', 'Another device on the network is using this address.']] },
+        { cmd: 'ping -n 4 127.0.0.1', what: "Tests the TCP/IP stack on the device itself. If this fails, the problem is the device, not the network." },
+        { cmd: 'ping -n 4 {gw}', what: 'Tests the local link to the gateway.',
+          out: [['ok', 'Reply from {gw}: bytes=32 time<1ms TTL=64', 'The link and the gateway are working.'],
+                ['bad', 'Reply from {ip}: Destination host unreachable.', 'The gateway never answered ARP. See the ARP tests.'],
+                ['warn', 'Request timed out.', 'No reply. The gateway may be down, or it may block ping. The ARP table tells you which.']] },
+        { cmd: 'ping -n 4 {target}', what: 'Tests routing past the gateway.',
+          out: [['bad', 'Request timed out.', 'The gateway answers but traffic stops beyond it. See the route tests.']] },
+        { cmd: 'nslookup example.com', what: 'Tests DNS. If pinging an IP address works but names fail, the problem is DNS.' },
+        { cmd: 'ipconfig /release && ipconfig /renew', what: 'Drops the current address and asks DHCP for a new one.' },
+      ],
+      mtu: [
+        { cmd: 'ping -f -l {payload} -n 2 {target}', what: "-f sets Don't Fragment and -l sets the data size. {payload} bytes of data plus 28 bytes of headers makes a {mtu}-byte packet.",
+          out: [['ok', 'Reply from {target}: bytes={payload} time=14ms TTL=117', 'Every link on the path carries {mtu}-byte packets.'],
+                ['ok', 'Reply from {target}: bytes=68 (sent {payload}) time=14ms TTL=117', SHORT_REPLY],
+                ['bad', 'Packet needs to be fragmented but DF set.', 'A link on the path has a smaller MTU. Lower the MTU until replies come back.'],
+                ['warn', 'Request timed out.   (while smaller sizes get replies)', BLACK_HOLE]] },
+        { cmd: 'netsh interface ipv4 show subinterfaces', what: 'Shows the MTU set on each interface.' },
+        { cmd: 'netsh interface ipv4 set subinterface "{iface}" mtu={mtu} store=persistent', tag: 'Run as administrator', what: 'Sets the interface MTU. Use the largest MTU that passed the test.' },
+      ],
+      route: [
+        { cmd: 'route print -4', what: 'Lists the routing table. Rows with network 0.0.0.0 and mask 0.0.0.0 are default routes. When there are two, the one with the lower metric wins.',
+          out: [['bad', 'No 0.0.0.0 row under Active Routes', 'No default gateway, so the device can only reach its own subnet.']] },
+        { cmd: 'Find-NetRoute -RemoteIPAddress {target}', tag: 'PowerShell', what: 'Shows the route, interface, and source IP that Windows will use to reach {target}.' },
+        { cmd: 'tracert -d {target}', what: 'Lists each router on the way. -d skips name lookups so it runs faster. Windows tracert uses ICMP.',
+          out: [['bad', '  2     *        *        *     Request timed out.   (on every line after hop 1)', "Traffic dies after the gateway. The gateway isn't forwarding, or has no route onward."],
+                ['bad', 'The same few hops repeating', 'A routing loop between those routers.']] },
+        { cmd: 'pathping -n {target}', what: 'Measures packet loss at every hop and takes a few minutes. Loss that starts at one hop and continues to the end points to that hop.' },
+        { cmd: 'route add <network> mask <mask> {gw}', tag: 'Run as administrator', what: 'Adds a route to another network through the gateway. Add -p to keep it after a restart.' },
+      ],
+      arp: [
+        { cmd: 'arp -a', what: "Lists the IP-to-MAC cache. Look for {gw}: it should be listed as dynamic with the router's MAC.",
+          out: [['bad', 'No entry for {gw}', 'The gateway never answered ARP. That points to layer 2: the cable, switch port, VLAN, or Wi-Fi.'],
+                ['warn', 'Entries for addresses outside your subnet', 'The mask is too short, so the device ARPs for hosts it should reach through the gateway.']] },
+        { cmd: 'Get-NetNeighbor -AddressFamily IPv4 -IPAddress {gw}', tag: 'PowerShell', what: "Shows the gateway's ARP state. Reachable or Stale is fine. Incomplete or Unreachable means it isn't answering." },
+        { cmd: 'arp -d *', tag: 'Run as administrator', what: 'Clears the ARP cache, for example after a router swap or after fixing a duplicate IP.' },
+      ],
+    },
+    linux: {
+      reach: [
+        { cmd: 'ip -4 addr show', what: 'Shows the IPv4 address and prefix on each interface.',
+          out: [['bad', 'inet 169.254.12.34/16 ...', 'No DHCP lease. Check the cable, the VLAN, and the DHCP server.'],
+                ['bad', 'No inet line under the interface', 'The interface has no IPv4 address at all.']] },
+        { cmd: 'ip -4 route show default', what: 'Shows the default gateway.',
+          out: [['ok', 'default via {gw} dev {iface} proto dhcp metric 100', 'The gateway is set.'],
+                ['bad', '(no output)', 'No default gateway, so the device can only reach its own subnet.']] },
+        { cmd: 'ping -c 4 {gw}', what: 'Tests the local link to the gateway.',
+          out: [['ok', '64 bytes from {gw}: icmp_seq=1 ttl=64 time=0.6 ms', 'The link and the gateway are working.'],
+                ['bad', 'From {ip} icmp_seq=1 Destination Host Unreachable', 'The gateway never answered ARP. See the ARP tests.']] },
+        { cmd: 'ping -c 4 {target}', what: 'Tests routing past the gateway.',
+          out: [['bad', '4 packets transmitted, 0 received, 100% packet loss', 'The gateway answers but traffic stops beyond it. See the route tests.']] },
+        { cmd: 'getent hosts example.com', what: 'Tests name lookups through the system resolver. No output means DNS is failing.' },
+        { cmd: 'resolvectl status', what: 'Shows which DNS servers each interface uses, on systems with systemd-resolved.' },
+      ],
+      mtu: [
+        { cmd: 'ping -M do -s {payload} -c 2 {target}', what: "-M do sets Don't Fragment and -s sets the data size. {payload} bytes of data plus 28 bytes of headers makes a {mtu}-byte packet. Linux reports {payload8} bytes because it counts the 8-byte ICMP header.",
+          out: [['ok', '{payload8} bytes from {target}: icmp_seq=1 ttl=117 time=14 ms', 'Every link on the path carries {mtu}-byte packets.'],
+                ['ok', '76 bytes from {target}: icmp_seq=1 ttl=117 (truncated)', SHORT_REPLY],
+                ['bad', 'ping: local error: message too long, mtu=1500', "The device's own interface MTU is smaller than this packet."],
+                ['bad', 'From 10.0.0.1 icmp_seq=1 Frag needed and DF set (mtu = 1492)', 'A router on the path has a smaller MTU, and it tells you the number.'],
+                ['warn', '100% packet loss   (while smaller sizes get replies)', BLACK_HOLE]] },
+        { cmd: 'tracepath -n {target}', what: 'Finds the path MTU hop by hop, without root.',
+          out: [['ok', 'Resume: pmtu 1500 hops 11 back 11', 'The path MTU to {target} is 1500.']] },
+        { cmd: 'ip link show {iface}', what: 'Shows the interface MTU in the "mtu 1500" field.' },
+        { cmd: 'sudo ip link set dev {iface} mtu {mtu}', what: 'Sets the interface MTU until the next reboot. Use the largest MTU that passed the test.' },
+      ],
+      route: [
+        { cmd: 'ip -4 route show', what: 'Lists the routing table. "default via" lines are default gateways. When there are two, the one with the lower metric wins.' },
+        { cmd: 'ip route get {target}', what: 'Shows the exact route, interface, and source IP the kernel will use for {target}.',
+          out: [['ok', '{target} via {gw} dev {iface} src {ip}', 'Traffic leaves through the expected gateway.'],
+                ['bad', 'RTNETLINK answers: Network is unreachable', 'No route to {target}, usually because there is no default gateway.']] },
+        { cmd: 'traceroute -n {target}', what: 'Lists each router on the way. Linux sends UDP probes by default. Add -I and run it with sudo to use ICMP like Windows tracert.',
+          out: [['bad', ' 2  * * *   (on every line after hop 1)', "Traffic dies after the gateway. The gateway isn't forwarding, or has no route onward."]] },
+        { cmd: 'mtr -n -r -c 20 {target}', what: 'Measures loss and delay at every hop (install the mtr package). Loss that starts at one hop and continues to the end points to that hop.' },
+        { cmd: 'sudo ip route add <network>/<prefix> via {gw}', what: 'Adds a route to another network through the gateway, until the next reboot.' },
+      ],
+      arp: [
+        { cmd: 'ip -4 neigh show', what: 'Lists the ARP cache with a state for each entry.',
+          out: [['ok', '{gw} dev {iface} lladdr 00:11:22:33:44:55 REACHABLE', 'The gateway answered recently.'],
+                ['ok', '{gw} dev {iface} lladdr 00:11:22:33:44:55 STALE', 'Not confirmed lately. This is normal; Linux checks again the next time it sends there.'],
+                ['bad', '{gw} dev {iface} FAILED', 'No ARP reply. INCOMPLETE means it is still waiting. Both point to layer 2: the cable, switch port, VLAN, or Wi-Fi.']] },
+        { cmd: 'sudo arping -c 3 -I {iface} {gw}', what: 'Pings at the ARP level, so it works even when the gateway blocks ICMP. Replies from two different MACs mean two devices claim the address.' },
+        { cmd: 'sudo arping -D -c 3 -I {iface} {ip}', what: 'Checks whether another device already uses {ip}.',
+          out: [['ok', 'Received 0 response(s)', 'Nobody else is using {ip}.'],
+                ['bad', 'Received 1 response(s)', 'Another device already has {ip}.']] },
+        { cmd: 'sudo ip neigh flush dev {iface}', what: 'Clears the ARP cache, for example after a router swap or after fixing a duplicate IP.' },
+      ],
+    },
+  };
+  const MARKS = { ok: '✓', bad: '✕', warn: '!', info: 'i' };
+  const MARK_WORDS = { ok: 'Pass', bad: 'Fail', warn: 'Warning', info: 'Note' };
+  const fill = (tpl, v) => tpl.replace(/\{(\w+)\}/g, (all, k) => (v[k] !== undefined ? v[k] : all));
+
+  function initTests() {
+    const saved = store.get('tests', {}) || {};
+    const st = {
+      os: saved.os === 'linux' ? 'linux' : 'windows',
+      target: typeof saved.target === 'string' ? saved.target : '8.8.8.8',
+      ifaceWin: typeof saved.ifaceWin === 'string' ? saved.ifaceWin : 'Ethernet',
+      ifaceLinux: typeof saved.ifaceLinux === 'string' ? saved.ifaceLinux : 'eth0',
+      mtu: typeof saved.mtu === 'string' ? saved.mtu : '1500',
+    };
+    const targetEl = $('ts-target'), ifaceEl = $('ts-iface'), mtuEl = $('ts-mtu');
+
+    function values() {
+      const ip = parseIP($('ck-ip').value), gw = parseIP($('ck-gw').value);
+      const mtu = Number(st.mtu.trim());
+      const okMtu = st.mtu.trim() !== '' && Number.isInteger(mtu) && mtu >= 68 && mtu <= 65535;
+      const iface = (st.os === 'windows' ? st.ifaceWin : st.ifaceLinux).trim();
+      return {
+        ip: ip !== null ? ipStr(ip) : '<device-ip>',
+        gw: gw !== null ? ipStr(gw) : '<gateway>',
+        target: st.target.trim() || '<target>',
+        iface: iface || '<interface>',
+        mtu: okMtu ? String(mtu) : '<mtu>',
+        payload: okMtu ? String(mtu - 28) : '<size>',
+        payload8: okMtu ? String(mtu - 20) : '<size>',
+        okMtu,
+      };
+    }
+
+    function cmdHTML(t, v) {
+      const c = fill(t.cmd, v);
+      const tag = t.tag ? `<span class="badge special">${esc(t.tag)}</span>` : '';
+      const outs = (t.out || []).map(([state, line, note]) =>
+        `<li><span class="mark ${state}" aria-hidden="true">${MARKS[state]}</span><div><code><span class="sr">${MARK_WORDS[state]}: </span>${esc(fill(line, v))}</code><p>${esc(fill(note, v))}</p></div></li>`
+      ).join('');
+      return `<div class="cmd"><div class="cmd-line"><code>${esc(c)}</code><button type="button" class="btn small" data-copy="${esc(c)}">Copy</button></div>` +
+        `<p class="what">${tag}${esc(fill(t.what, v))}</p>${outs ? `<ul class="outs">${outs}</ul>` : ''}</div>`;
+    }
+
+    function render() {
+      const v = values();
+      const set = TESTS[st.os];
+      $('ts-reach').innerHTML = set.reach.map((t) => cmdHTML(t, v)).join('');
+      $('ts-mtu-cmds').innerHTML = set.mtu.map((t) => cmdHTML(t, v)).join('');
+      $('ts-route').innerHTML = set.route.map((t) => cmdHTML(t, v)).join('');
+      $('ts-arp').innerHTML = set.arp.map((t) => cmdHTML(t, v)).join('');
+      $('ts-mtu-calc').innerHTML = v.okMtu
+        ? `${v.mtu} MTU − 20 IP header − 8 ICMP header = <b>${v.payload}</b> bytes of ping data`
+        : 'Enter an MTU from 68 to 65535.';
+      document.querySelectorAll('#ts-mtu-presets [data-mtu]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mtu === st.mtu.trim())));
+      store.set('tests', st);
+    }
+
+    function syncInputs() {
+      $('ts-os-' + st.os).checked = true;
+      targetEl.value = st.target;
+      ifaceEl.value = st.os === 'windows' ? st.ifaceWin : st.ifaceLinux;
+      ifaceEl.placeholder = st.os === 'windows' ? 'Ethernet or Wi-Fi' : 'eth0 or wlan0';
+      mtuEl.value = st.mtu;
+    }
+
+    document.querySelectorAll('input[name="ts-os"]').forEach((el) => el.addEventListener('change', () => {
+      st.os = el.value;
+      syncInputs();
+      render();
+    }));
+    targetEl.addEventListener('input', () => { st.target = targetEl.value; render(); });
+    ifaceEl.addEventListener('input', () => {
+      if (st.os === 'windows') st.ifaceWin = ifaceEl.value; else st.ifaceLinux = ifaceEl.value;
+      render();
+    });
+    mtuEl.addEventListener('input', () => { st.mtu = mtuEl.value; render(); });
+    const stepMtu = (d) => {
+      const n = Number(st.mtu);
+      st.mtu = String(Math.max(68, Math.min(65535, (Number.isInteger(n) ? n : 1500) + d)));
+      mtuEl.value = st.mtu;
+      render();
+    };
+    $('ts-mtu-dec').addEventListener('click', () => stepMtu(-1));
+    $('ts-mtu-inc').addEventListener('click', () => stepMtu(1));
+    document.querySelectorAll('#ts-mtu-presets [data-mtu]').forEach((b) => b.addEventListener('click', () => {
+      st.mtu = b.dataset.mtu;
+      mtuEl.value = st.mtu;
+      render();
+    }));
+    ['ck-ip', 'ck-gw'].forEach((id) => $(id).addEventListener('input', render));
+
+    syncInputs();
+    render();
+    return { render };
   }
 
   // ---------- Subnet solver ----------
@@ -1125,7 +1320,8 @@ Wireless LAN adapter Wi-Fi:
   // ---------- App shell ----------
   const solver = initSolver();
   const lookup = initLookup(solver);
-  const check = initCheck();
+  const tests = initTests();
+  const check = initCheck(() => tests.render());
   initScan(lookup, check);
 
   const VIEWS = ['lookup', 'scan', 'check', 'subnets'];

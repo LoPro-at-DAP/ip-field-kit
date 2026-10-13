@@ -4,7 +4,11 @@ An installable web app (PWA) for IPv4 work in the field. It works offline once i
 
 - **Lookup**: enter an IP and a mask (`/26`, `255.255.255.192`, or a wildcard like `0.0.0.63`) to get the network, usable range, broadcast, host position, address type (private, public, APIPA, CGNAT, loopback, multicast…), class, binary, hex, and reverse DNS name. You can also step through neighboring subnets.
 - **Scan**: take a photo of a screen, label, or printout (or paste command output) and the app pulls out every IPv4 address, labeled as IP, mask, gateway, DNS, and so on. It understands `ipconfig`, `ifconfig`, `ip addr`, `ip route`, and Cisco-style config. When it finds a full set of settings, one tap sends them to Check.
-- **Check**: enter a device's IP, mask, and gateway to catch common misconfigurations: a gateway outside the subnet, a network or broadcast address assigned to a device, or an APIPA address from a failed DHCP lease.
+- **Check**: enter a device's IP, mask, and gateway to catch common misconfigurations: a gateway outside the subnet, a network or broadcast address assigned to a device, or an APIPA address from a failed DHCP lease. Below that are Windows and Linux commands to run on the device, filled in with its addresses, with example output for passing and failing results:
+  - **Reachability**: loopback, gateway, remote host, DNS.
+  - **MTU and fragmentation**: `ping -f -l 1472` (Windows) or `ping -M do -s 1472` (Linux), with a calculator (data size = MTU − 28) and presets for PPPoE, GRE, VXLAN, VPN, and jumbo frames.
+  - **Routes**: `route print`, `Find-NetRoute`, `ip route get`, `tracert`, `traceroute`, `pathping`, `mtr`.
+  - **ARP**: `arp -a`, `Get-NetNeighbor`, `ip neigh`, `arping`, including duplicate-IP detection.
 - **Subnets**: the borrowing-bits solver, with worked math and the hosts and subnets lookup tables.
 
 ## Files
