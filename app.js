@@ -152,9 +152,11 @@
     if (!btn) return;
     const text = btn.dataset.copy;
     const done = () => toast(`Copied ${text}`);
+    const fail = () => toast("Couldn't copy. Select the text and copy it by hand.");
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(done, () => legacyCopy(text) && done());
+      navigator.clipboard.writeText(text).then(done, () => (legacyCopy(text) ? done() : fail()));
     } else if (legacyCopy(text)) done();
+    else fail();
   });
 
   function legacyCopy(text) {
@@ -549,56 +551,75 @@
   // ---------- Scan ----------
   const ROLE_LABEL = { ip: 'IP address', mask: 'Mask', gateway: 'Gateway', dns: 'DNS server', dhcp: 'DHCP server', broadcast: 'Broadcast', address: 'Address' };
   const ROLE_CLASS = { ip: 'private', mask: '', gateway: 'special', dns: 'public', dhcp: '', broadcast: '', address: '' };
-  // Checked in order against the words just before each address on its line.
+  // The role keyword closest before an address decides its role, so "proto dhcp src 10.0.0.5" labels 10.0.0.5 by "src".
   const ROLE_WORDS = [
-    ['dhcp', /dhcp/i],
-    ['dns', /dns|name ?server/i],
-    ['gateway', /gateway|default via|\bvia\b|\bgw\b|router|next.?hop/i],
-    ['mask', /mask/i],
-    ['broadcast', /broadcast|\bbrd\b|bcast/i],
-    ['ip', /ipv4|ip address|\binet\b|\baddr(ess)?\b|\bip\b/i],
+    ['dhcp', /dhcp/gi],
+    ['dns', /dns|name ?servers?/gi],
+    ['gateway', /gateway|default via|\bvia\b|\bgw\b|router|next.?hop/gi],
+    ['mask', /mask/gi],
+    ['broadcast', /broadcast|\bbrd\b|bcast/gi],
+    ['ip', /ipv4|ip address|\binet\b|\baddr(ess)?\b|\bip\b|\bsrc\b/gi],
   ];
-  const IP_IN_TEXT = /(^|[^\d])(\d{1,3}) ?[.,] ?(\d{1,3}) ?[.,] ?(\d{1,3}) ?[.,] ?(\d{1,3})(?: ?\/ ?(\d{1,2}))?(?!\d)/g;
+  // Dots may have a stray space beside them (OCR). Commas count only with no spaces, so "steps 1, 2, 3, 4" isn't an address.
+  const IP_IN_TEXT = /(^|[^\d])(\d{1,3})(?: ?\. ?|,)(\d{1,3})(?: ?\. ?|,)(\d{1,3})(?: ?\. ?|,)(\d{1,3})(?: ?\/ ?(\d{1,2}))?(?!\d)/g;
 
-  // Fix common OCR mix-ups (O→0, l→1, S→5, B→8) inside runs that look like addresses.
+  function closestRole(text) {
+    let best = null, at = -1;
+    for (const [role, re] of ROLE_WORDS) {
+      re.lastIndex = 0;
+      let m;
+      while ((m = re.exec(text))) {
+        const end = m.index + m[0].length;
+        if (end > at) { at = end; best = role; }
+      }
+    }
+    return best;
+  }
+
+  // Fix common OCR mix-ups inside runs that look like addresses: O→0, l→1, S→5, B→8, and a dot read as a colon.
+  // A colon only counts as a dot when the run already has a real dot, so MAC addresses like 28:11:22:33 stay untouched.
   function fixOcr(line) {
-    return line.replace(/[0-9OoIl|SB][0-9OoIl|SB.,]{6,}/g, (tok) =>
-      (tok.match(/[.,]/g) || []).length >= 3 && (tok.match(/\d/g) || []).length >= 4
-        ? tok.replace(/[Oo]/g, '0').replace(/[Il|]/g, '1').replace(/S/g, '5').replace(/B/g, '8')
-        : tok);
+    return line.replace(/[0-9OoIl|SB][0-9OoIl|SB.,:]{6,}/g, (tok) => {
+      if ((tok.match(/\d/g) || []).length < 4) return tok;
+      const dots = (tok.match(/[.,]/g) || []).length, colons = (tok.match(/:/g) || []).length;
+      let t = tok;
+      if (colons && dots >= 1 && dots + colons === 3) t = t.replace(/:/g, '.');
+      else if (dots < 3) return tok;
+      return t.replace(/[Oo]/g, '0').replace(/[Il|]/g, '1').replace(/S/g, '5').replace(/B/g, '8');
+    });
   }
 
   function extractIPs(text) {
     const items = [];
     const seen = new Set();
-    let last = null;
+    let carry = null; // label of the line above, for values continued on the next line (ipconfig gateways, DNS servers)
     text.split(/\r?\n/).forEach((raw, lineNo) => {
       const line = fixOcr(raw);
+      if (!line.trim()) { carry = null; return; }
       IP_IN_TEXT.lastIndex = 0;
-      let m, prevEnd = 0;
-      const lineHits = [];
+      let m, prevEnd = 0, inherited = false;
+      const hits = [];
       while ((m = IP_IN_TEXT.exec(line))) {
         const start = m.index + m[1].length;
+        const before = line.slice(prevEnd, start);
+        prevEnd = IP_IN_TEXT.lastIndex;
         const octs = [m[2], m[3], m[4], m[5]].map(Number);
         const prefix = m[6] !== undefined ? Number(m[6]) : null;
-        if (octs.some((o) => o > 255) || (prefix !== null && prefix > 32)) { prevEnd = IP_IN_TEXT.lastIndex; continue; }
+        if (octs.some((o) => o > 255) || (prefix !== null && prefix > 32)) continue;
         const n = ((octs[0] * 256 + octs[1]) * 256 + octs[2]) * 256 + octs[3];
-        const before = line.slice(prevEnd, start);
-        let role = null;
-        for (const [r, re] of ROLE_WORDS) if (re.test(before)) { role = r; break; }
+        let role = closestRole(before);
         if (!role) {
-          const onlyThis = line.replace(m[0].slice(m[1].length), '').replace(/[\s:.,()\[\]-]/g, '') === '';
-          const mp = prefix === null ? prefixOfMask(n) : -1;
-          if (onlyThis && last && last.lineNo === lineNo - 1 && !/[a-z]/i.test(before)) role = last.role;
-          else if (mp >= 8) role = 'mask';
+          const onlyThis = line.replace(m[0].slice(m[1].length), '').replace(/[\s:.,()[\]|-]/g, '') === '';
+          if (onlyThis && carry) { role = carry; inherited = true; }
+          else if (prefix === null && prefixOfMask(n) >= 8) role = 'mask';
           else role = 'address';
         }
-        lineHits.push({ n, prefix, role, lineNo, line: raw });
-        prevEnd = IP_IN_TEXT.lastIndex;
+        hits.push({ n, prefix, role, lineNo, line: raw });
       }
-      lineHits.forEach((h) => {
+      // A labeled line passes its label down even when its own value wasn't IPv4 (for example an IPv6 gateway).
+      carry = closestRole(line.replace(IP_IN_TEXT, ' ')) || (inherited ? carry : null);
+      hits.forEach((h) => {
         const key = `${h.role}|${h.n}|${h.prefix}`;
-        last = h;
         if (seen.has(key)) return;
         seen.add(key);
         items.push(h);
@@ -678,7 +699,8 @@ Wireless LAN adapter Wi-Fi:
       return workerP;
     }
 
-    // Grayscale, stretch contrast, and turn light-on-dark screens into dark-on-light text.
+    // Grayscale, turn light-on-dark screens into dark-on-light text, then even out the lighting:
+    // estimate the background brightness tile by tile and divide it out. This works however little of the photo is text.
     async function prepImage(url) {
       const img = await new Promise((resolve, reject) => {
         const i = new Image();
@@ -696,28 +718,87 @@ Wireless LAN adapter Wi-Fi:
       ctx.drawImage(img, 0, 0, w, h);
       const im = ctx.getImageData(0, 0, w, h);
       const px = im.data;
+      const n = w * h;
+      const g = new Uint8ClampedArray(n);
       const hist = new Uint32Array(256);
-      let sum = 0;
-      for (let i = 0; i < px.length; i += 4) {
+      for (let i = 0, j = 0; j < n; i += 4, j++) {
         const y = ((px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000) | 0;
-        px[i] = y;
+        g[j] = y;
         hist[y]++;
-        sum += y;
       }
-      const count = px.length / 4;
-      const invert = sum / count < 110;
-      let lo = 0, hi = 255, acc = 0;
-      for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= count * 0.02) { lo = v; break; } }
-      acc = 0;
-      for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= count * 0.02) { hi = v; break; } }
-      const range = Math.max(1, hi - lo);
-      for (let i = 0; i < px.length; i += 4) {
-        let y = Math.max(0, Math.min(255, ((px[i] - lo) * 255) / range));
-        if (invert) y = 255 - y;
-        px[i] = px[i + 1] = px[i + 2] = y;
+      let acc = 0, median = 0;
+      for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= n / 2) { median = v; break; } }
+      if (median < 110) for (let j = 0; j < n; j++) g[j] = 255 - g[j];
+
+      // Background per tile = its 90th-percentile brightness (the paper or screen, not the text).
+      const B = Math.max(16, Math.round(Math.min(w, h) / 20));
+      const bw = Math.ceil(w / B), bh = Math.ceil(h / B);
+      const bg = new Float32Array(bw * bh);
+      const th = new Uint32Array(256);
+      for (let by = 0; by < bh; by++) {
+        for (let bx = 0; bx < bw; bx++) {
+          th.fill(0);
+          let cnt = 0;
+          const x1 = Math.min(w, (bx + 1) * B), y1 = Math.min(h, (by + 1) * B);
+          for (let y = by * B; y < y1; y++) for (let x = bx * B; x < x1; x++) { th[g[y * w + x]]++; cnt++; }
+          let a = 0, v = 255;
+          for (let k = 255; k >= 0; k--) { a += th[k]; if (a >= cnt * 0.1) { v = k; break; } }
+          bg[by * bw + bx] = Math.max(v, 1);
+        }
+      }
+      for (let y = 0; y < h; y++) {
+        const fy = Math.min(Math.max((y + 0.5) / B - 0.5, 0), bh - 1);
+        const y0 = Math.floor(fy), y1 = Math.min(y0 + 1, bh - 1), ty = fy - y0;
+        for (let x = 0; x < w; x++) {
+          const fx = Math.min(Math.max((x + 0.5) / B - 0.5, 0), bw - 1);
+          const x0 = Math.floor(fx), x1 = Math.min(x0 + 1, bw - 1), tx = fx - x0;
+          const b = (bg[y0 * bw + x0] * (1 - tx) + bg[y0 * bw + x1] * tx) * (1 - ty) + (bg[y1 * bw + x0] * (1 - tx) + bg[y1 * bw + x1] * tx) * ty;
+          const norm = Math.min(255, (g[y * w + x] * 255) / b);
+          const v = 255 - Math.min(255, (255 - norm) * 1.5);
+          const i = (y * w + x) * 4;
+          px[i] = px[i + 1] = px[i + 2] = v;
+        }
       }
       ctx.putImageData(im, 0, 0);
-      return c;
+
+      // Straighten tilted photos. Tesseract copes with small tilts itself, and rotating adds a little blur,
+      // so only straighten from 4 degrees up.
+      const angle = skewAngle(px, w, h);
+      if (Math.abs(angle) < 4) return c;
+      const r = document.createElement('canvas');
+      r.width = w;
+      r.height = h;
+      const rc = r.getContext('2d');
+      rc.fillStyle = '#fff';
+      rc.fillRect(0, 0, w, h);
+      rc.translate(w / 2, h / 2);
+      rc.rotate((-angle * Math.PI) / 180);
+      rc.drawImage(c, -w / 2, -h / 2);
+      return r;
+    }
+
+    // Find the tilt (−15° to 15°) at which dark pixels stack into the sharpest text lines.
+    function skewAngle(px, w, h) {
+      const step = Math.max(1, Math.round(Math.sqrt((w * h) / 250000)));
+      const xs = [], ys = [];
+      for (let y = 0; y < h; y += step) for (let x = 0; x < w; x += step) if (px[(y * w + x) * 4] < 128) { xs.push(x); ys.push(y); }
+      if (xs.length < 50) return 0;
+      const bins = new Float64Array(Math.ceil((h + 2 * w) / step) + 2);
+      const score = (deg) => {
+        const tan = Math.tan((deg * Math.PI) / 180);
+        bins.fill(0);
+        for (let i = 0; i < xs.length; i++) bins[Math.round((ys[i] - xs[i] * tan + w) / step)]++;
+        let sum = 0;
+        for (let i = 0; i < bins.length; i++) sum += bins[i] * bins[i];
+        return sum;
+      };
+      const flat = score(0);
+      let best = 0, bestScore = flat;
+      for (let deg = -15; deg <= 15; deg += 0.5) {
+        const sc = score(deg);
+        if (sc > bestScore) { bestScore = sc; best = deg; }
+      }
+      return bestScore > flat * 1.1 ? best : 0;
     }
 
     async function scanFile(file) {
@@ -831,7 +912,7 @@ Wireless LAN adapter Wi-Fi:
         { cmd: 'ping -f -l {payload} -n 2 {target}', what: "-f sets Don't Fragment and -l sets the data size. {payload} bytes of data plus 28 bytes of headers makes a {mtu}-byte packet.",
           out: [['ok', 'Reply from {target}: bytes={payload} time=14ms TTL=117', 'Every link on the path carries {mtu}-byte packets.'],
                 ['ok', 'Reply from {target}: bytes=68 (sent {payload}) time=14ms TTL=117', SHORT_REPLY],
-                ['bad', 'Packet needs to be fragmented but DF set.', 'A link on the path has a smaller MTU. Lower the MTU until replies come back.'],
+                ['bad', 'Packet needs to be fragmented but DF set.', "Something has a smaller MTU: a link on the path, or this device's own interface (check it with netsh interface ipv4 show subinterfaces). Lower the MTU until replies come back."],
                 ['warn', 'Request timed out.   (while smaller sizes get replies)', BLACK_HOLE]] },
         { cmd: 'netsh interface ipv4 show subinterfaces', what: 'Shows the MTU set on each interface.' },
         { cmd: 'netsh interface ipv4 set subinterface "{iface}" mtu={mtu} store=persistent', tag: 'Run as administrator', what: 'Sets the interface MTU. Use the largest MTU that passed the test.' },
@@ -871,10 +952,11 @@ Wireless LAN adapter Wi-Fi:
         { cmd: 'resolvectl status', what: 'Shows which DNS servers each interface uses, on systems with systemd-resolved.' },
       ],
       mtu: [
-        { cmd: 'ping -M do -s {payload} -c 2 {target}', what: "-M do sets Don't Fragment and -s sets the data size. {payload} bytes of data plus 28 bytes of headers makes a {mtu}-byte packet. Linux reports {payload8} bytes because it counts the 8-byte ICMP header.",
+        { cmd: 'ping -M do -s {payload} -c 2 {target}', what: "-M do sets Don't Fragment and -s sets the data size. {payload} bytes of data plus 28 bytes of headers makes a {mtu}-byte packet, shown on the first line as {payload}({mtu}). Linux reports {payload8} bytes per reply because it counts the 8-byte ICMP header.",
           out: [['ok', '{payload8} bytes from {target}: icmp_seq=1 ttl=117 time=14 ms', 'Every link on the path carries {mtu}-byte packets.'],
                 ['ok', '76 bytes from {target}: icmp_seq=1 ttl=117 (truncated)', SHORT_REPLY],
-                ['bad', 'ping: local error: message too long, mtu=1500', "The device's own interface MTU is smaller than this packet."],
+                ['bad', 'ping: sendmsg: Message too long', "This device's own interface MTU is smaller than the packet, so it never left. Check it with ip link show {iface}."],
+                ['bad', 'ping: local error: message too long, mtu=1436', 'Seen on older ping versions, or when the device already learned a smaller path MTU. The number at the end is the limit.'],
                 ['bad', 'From 10.0.0.1 icmp_seq=1 Frag needed and DF set (mtu = 1492)', 'A router on the path has a smaller MTU, and it tells you the number.'],
                 ['warn', '100% packet loss   (while smaller sizes get replies)', BLACK_HOLE]] },
         { cmd: 'tracepath -n {target}', what: 'Finds the path MTU hop by hop, without root.',
@@ -897,7 +979,7 @@ Wireless LAN adapter Wi-Fi:
           out: [['ok', '{gw} dev {iface} lladdr 00:11:22:33:44:55 REACHABLE', 'The gateway answered recently.'],
                 ['ok', '{gw} dev {iface} lladdr 00:11:22:33:44:55 STALE', 'Not confirmed lately. This is normal; Linux checks again the next time it sends there.'],
                 ['bad', '{gw} dev {iface} FAILED', 'No ARP reply. INCOMPLETE means it is still waiting. Both point to layer 2: the cable, switch port, VLAN, or Wi-Fi.']] },
-        { cmd: 'sudo arping -c 3 -I {iface} {gw}', what: 'Pings at the ARP level, so it works even when the gateway blocks ICMP. Replies from two different MACs mean two devices claim the address.' },
+        { cmd: 'sudo arping -c 3 -I {iface} {gw}', what: 'Pings at the ARP level, so it works even when the gateway blocks ICMP. Replies from two different MACs mean two devices claim the address. If arping is missing on Debian or Ubuntu, install it with sudo apt install iputils-arping.' },
         { cmd: 'sudo arping -D -c 3 -I {iface} {ip}', what: 'Checks whether another device already uses {ip}.',
           out: [['ok', 'Received 0 response(s)', 'Nobody else is using {ip}.'],
                 ['bad', 'Received 1 response(s)', 'Another device already has {ip}.']] },
@@ -1098,6 +1180,7 @@ Wireless LAN adapter Wi-Fi:
           const gap = base - passed;
           const hits = OVERHEAD_CAUSES.filter(([lo, hi]) => gap >= lo && gap <= hi);
           why = `<p class="calc">${base} − ${passed} = <b>${gap}</b> bytes missing</p>`;
+          if (gap > 0) why += `<p class="cap">First check the device's own interface MTU (netsh interface ipv4 show subinterfaces, or ip link show). If it's already ${passed}, the limit is on the device, not the path.</p>`;
           if (gap === 0) why += '<p class="cap">Nothing is missing. The full MTU gets through.</p>';
           else if (hits.length) why += `<ul class="matches">${hits.map(([lo, hi, cause]) => `<li><b>${lo === hi ? lo : `${lo}–${hi}`}</b><span>${esc(cause)}</span></li>`).join('')}</ul>`;
           else why += '<p class="cap">No single common encapsulation matches. Several layers may be stacked: try combinations in the calculator above.</p>';
@@ -1197,25 +1280,31 @@ Wireless LAN adapter Wi-Fi:
     const f = { ip: $('ws-ip'), prefix: $('ws-prefix'), mac: $('ws-mac'), size: $('ws-size'), iface: $('ws-iface') };
 
     function values() {
+      const errs = [];
       const ipN = parseIP(st.ip);
+      if (ipN === null) errs.push(st.ip.trim() ? `"${st.ip.trim()}" isn't a complete IPv4 address.` : 'Enter the device or gateway IP.');
       const mk = parseMask(st.prefix);
-      const dev = ipN !== null ? ipN : parseIP('192.168.0.10');
+      let p = mk.p !== undefined ? mk.p : null;
+      if (p === null) errs.push(mk.empty ? 'Enter the prefix, like /24.' : mk.error);
       // Link-local is always a /16. Pick the laptop address near the device, away from the reserved first and last /24.
-      const apipa = netOf(dev, 16) === parseIP('169.254.0.0');
-      const p = apipa ? 16 : mk.p !== undefined ? mk.p : 24;
-      const mac = normMac(st.mac) || '00:11:22:33:44:55';
+      const apipa = ipN !== null && netOf(ipN, 16) === parseIP('169.254.0.0');
+      if (apipa) p = 16;
+      const mac = normMac(st.mac);
+      if (!mac) errs.push(st.mac.trim() ? `"${st.mac.trim()}" isn't a MAC address. Use 12 hex digits, like 00:11:22:33:44:55.` : 'Enter the device MAC.');
       const size = Number(st.size.trim());
+      const okSize = st.size.trim() !== '' && Number.isInteger(size) && size >= 0 && size <= 65500;
+      if (!okSize) errs.push('Enter the ping data size as a whole number from 0 to 65500.');
       const iface = (st.os === 'windows' ? st.ifaceWin : st.ifaceLinux).trim() || (st.os === 'windows' ? 'Ethernet' : 'eth0');
-      const laptop = laptopAddress(dev, apipa ? 24 : p);
+      const laptop = ipN !== null && p !== null ? laptopAddress(ipN, apipa ? 24 : p) : null;
       return {
-        devN: dev, p, mac, iface, laptopN: laptop, apipa,
-        ip: ipStr(dev),
-        subnet: `${ipStr(netOf(dev, p))}/${p}`,
-        size: Number.isInteger(size) && size >= 0 && size <= 65500 ? String(size) : '1472',
-        prefix: String(p),
-        mask: maskStr(p),
+        errs, devN: ipN, p, mac: mac || '<mac>', iface, laptopN: laptop, apipa,
+        ip: ipN !== null ? ipStr(ipN) : '<device-ip>',
+        subnet: ipN !== null && p !== null ? `${ipStr(netOf(ipN, p))}/${p}` : '<subnet>',
+        size: okSize ? String(size) : '<size>',
+        prefix: p !== null ? String(p) : '<prefix>',
+        mask: p !== null ? maskStr(p) : '<mask>',
         laptop: laptop !== null ? ipStr(laptop) : '<laptop-ip>',
-        ll: eui64(mac),
+        ll: mac ? eui64(mac) : 'fe80::<device-id>',
       };
     }
 
@@ -1229,7 +1318,7 @@ Wireless LAN adapter Wi-Fi:
         ['Enter its address above', "<p>Put the IP you found in <b>Device or gateway IP</b>. If you only learned its gateway, a /24 around that gateway is a reasonable first guess.</p>"],
         ["Check that your laptop's address is free", win
           ? c({ cmd: 'ping -n 2 {laptop}', what: 'No reply, and no entry for {laptop} in arp -a afterward, means nothing is using it.' })
-          : c({ cmd: 'sudo arping -D -c 3 -I {iface} {laptop}', what: '"Received 0 response(s)" means nothing is using {laptop}.' })],
+          : c({ cmd: 'sudo arping -D -c 3 -I {iface} {laptop}', what: '"Received 0 response(s)" means nothing is using {laptop}. If arping is missing on Debian or Ubuntu, install it with sudo apt install iputils-arping.' })],
         ['Give your laptop the address', win
           ? c({ cmd: 'netsh interface ipv4 set address name="{iface}" static {laptop} {mask}', tag: 'Run as administrator', what: 'No gateway is needed on a direct link.' })
           : c({ cmd: 'sudo ip addr add {laptop}/{prefix} dev {iface}', what: 'Adds the address alongside any you already have. No gateway is needed on a direct link.' })],
@@ -1250,8 +1339,11 @@ Wireless LAN adapter Wi-Fi:
       $('ws-find-list').innerHTML = list(WS_FIND, v);
       $('ws-capture').innerHTML = list(WS_CAPTURE, v);
 
+      $('ws-error').hidden = !v.errs.length;
+      $('ws-error').textContent = v.errs.join(' ');
       const sug = $('ws-suggest');
-      if (v.apipa) sug.innerHTML = `${esc(v.ip)} is a link-local (APIPA) address. Leave your laptop on DHCP with no DHCP server connected and it takes a 169.254 address of its own within about a minute, or set <b>${esc(v.laptop)}/16</b> by hand.`;
+      if (v.devN === null || v.p === null) sug.textContent = "Enter the device's IP and prefix above to get a suggested laptop address.";
+      else if (v.apipa) sug.innerHTML = `${esc(v.ip)} is a link-local (APIPA) address. Leave your laptop on DHCP with no DHCP server connected and it takes a 169.254 address of its own within about a minute, or set <b>${esc(v.laptop)}/16</b> by hand.`;
       else if (v.laptopN === null) sug.textContent = `A /${v.p} has no room for a second address. Check the prefix.`;
       else sug.innerHTML = `Suggested laptop address: <b>${esc(v.laptop)}/${v.p}</b> (mask ${esc(v.mask)}). It's in the same subnet as ${esc(v.ip)}. Confirm it's free in step 3.`;
 
