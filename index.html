@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>IP Field Kit</title>
-<meta name="description" content="Look up IPv4 address details, check a device's IP settings, and solve subnetting problems. Works offline.">
+<meta name="description" content="Find and connect to network equipment, look up IPv4 details, check device settings, and practice subnetting. Works offline.">
 <meta name="theme-color" content="#eef1f4" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0e141a" media="(prefers-color-scheme: dark)">
 <meta name="mobile-web-app-capable" content="yes">
@@ -441,6 +441,18 @@ details.tests > summary { font: 600 1.05rem/1.3 var(--font-body); }
 .matches li { display: grid; grid-template-columns: 4.5rem minmax(0, 1fr); gap: 10px; align-items: baseline; }
 .matches b { font: 600 14px var(--font-mono); color: var(--borrow); }
 
+/* Find a device */
+.seg.seg3 { grid-template-columns: repeat(3, 1fr); }
+#view-find[data-os="windows"] .os-macos, #view-find[data-os="windows"] .os-linux,
+#view-find[data-os="macos"] .os-windows, #view-find[data-os="macos"] .os-linux,
+#view-find[data-os="linux"] .os-windows, #view-find[data-os="linux"] .os-macos { display: none; }
+.why { margin: 0; padding: 12px 14px; border-radius: 10px; background: var(--net-tint); font-size: 14.5px; max-width: 64ch; }
+.why b { display: block; font: 600 11.5px/1.3 var(--font-body); letter-spacing: 0.07em; text-transform: uppercase; color: var(--net); padding-bottom: 4px; }
+.found { display: grid; gap: 10px; padding: 14px; border: 1px dashed var(--borrow); border-radius: 10px; background: var(--borrow-tint); }
+.found-title { margin: 0; font-weight: 700; color: var(--borrow); }
+.todo li::before { content: "□ "; color: var(--muted); }
+details.fstep > summary { font: 700 1.15rem/1.3 var(--font-display); }
+
 /* Scan */
 .filebtn { position: relative; overflow: hidden; display: inline-block; }
 .filebtn input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
@@ -582,7 +594,7 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
           <button type="button" class="btn nbr" id="lk-prev"><small>← Previous</small><span></span></button>
           <button type="button" class="btn nbr next" id="lk-next"><small>Next →</small><span></span></button>
         </div>
-        <button type="button" class="btn" id="lk-split">Split this subnet in the solver</button>
+        <button type="button" class="btn" id="lk-split">Practice splitting this subnet</button>
       </section>
 
       <section>
@@ -696,8 +708,9 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
       <h2 class="sec">Test it on the device</h2>
       <p class="cap">The checks above only cover the settings. These commands test the real network. Run them on the device and compare what you get with the example output.</p>
       <div class="panel controls">
-        <div class="seg" role="radiogroup" aria-label="Operating system">
+        <div class="seg seg3" role="radiogroup" aria-label="Operating system">
           <input type="radio" name="ts-os" id="ts-os-windows" value="windows"><label for="ts-os-windows">Windows</label>
+          <input type="radio" name="ts-os" id="ts-os-macos" value="macos"><label for="ts-os-macos">macOS</label>
           <input type="radio" name="ts-os" id="ts-os-linux" value="linux"><label for="ts-os-linux">Linux</label>
         </div>
         <div class="row">
@@ -744,6 +757,19 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
           <p class="calc" id="ts-mtu-calc"></p>
           <div class="tbody" id="ts-mtu-cmds"></div>
           <p class="cap">To find the path MTU, start at 1500. If the test fails, lower the MTU by 10 until it passes, then raise it by 1 until it fails. The last MTU that passed is the path MTU. TCP's maximum segment size (MSS) is the MTU − 40.</p>
+
+          <div class="inset">
+            <h3 class="sub">See it in Wireshark</h3>
+            <p class="cap">Capture while you run the ping tests, then type these in the filter bar above the packet list.</p>
+            <div class="tbody" id="ts-ws-size"></div>
+            <ul class="notes plain">
+              <li>Right-click <code>ip.len</code> or <code>data.len</code> in the packet details and choose <b>Apply as Column</b> to see sizes at a glance.</li>
+              <li><b>Statistics → Packet Lengths</b> shows how packet sizes are spread across the capture.</li>
+              <li>Wireshark shows frames without the 4-byte checksum, so a full-size frame reads 1514 bytes, or 1518 with a VLAN tag.</li>
+              <li>On the computer doing the capture, outgoing packets can show up far larger than the MTU, up to 64 KB. That's the network card's offloading, not a real packet on the wire. Turn it off with the command below, or capture from a switch mirror port.</li>
+            </ul>
+            <div id="ts-offload"></div>
+          </div>
 
           <div class="inset" id="ovh">
             <h3 class="sub">Tunnel and label overhead</h3>
@@ -820,94 +846,173 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
         <div class="tbody">
           <p class="cap">ARP finds the MAC address that goes with an IP on the local link. If the gateway has no ARP entry, the problem is at layer 2: the cable, switch port, VLAN, or Wi-Fi. ARP also exposes duplicate IP addresses.</p>
           <div class="tbody" id="ts-arp"></div>
+          <div class="inset">
+            <h3 class="sub">See it in Wireshark</h3>
+            <div class="tbody" id="ts-ws-arp"></div>
+          </div>
         </div>
       </details>
     </section>
   </div>
 
-  <!-- ================= Capture ================= -->
-  <div id="view-capture" class="view" hidden>
+  <!-- ================= Find a device ================= -->
+  <div id="view-find" class="view" data-os="windows" hidden>
     <header class="vhead">
-      <h1>Wireshark filters</h1>
-      <p class="lede">Display filters for packet sizes, ARP, and finding a device's address, plus the steps to address your laptop so you can reach it.</p>
+      <h1>Find a device</h1>
+      <p class="lede">Step-by-step help for reaching equipment when you don't know its IP address. Each step says what to do, what you'll see, and why it works. Work in order and stop as soon as you find it.</p>
     </header>
 
-    <section class="panel controls" aria-label="Values for the filters">
-      <div class="seg" role="radiogroup" aria-label="Your laptop's operating system">
-        <input type="radio" name="ws-os" id="ws-os-windows" value="windows"><label for="ws-os-windows">Windows</label>
-        <input type="radio" name="ws-os" id="ws-os-linux" value="linux"><label for="ws-os-linux">Linux</label>
+    <section class="panel controls" aria-label="Your laptop and what you know">
+      <div class="seg seg3" role="radiogroup" aria-label="Your laptop's operating system">
+        <input type="radio" name="fd-os" id="fd-os-windows" value="windows"><label for="fd-os-windows">Windows</label>
+        <input type="radio" name="fd-os" id="fd-os-macos" value="macos"><label for="fd-os-macos">macOS</label>
+        <input type="radio" name="fd-os" id="fd-os-linux" value="linux"><label for="fd-os-linux">Linux</label>
       </div>
-      <div class="row">
-        <div class="field grow">
-          <label for="ws-ip">Device or gateway IP</label>
-          <input id="ws-ip" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.0.10">
-        </div>
-        <div class="field pfx">
-          <label for="ws-prefix">Prefix</label>
-          <input id="ws-prefix" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/24">
-        </div>
+      <h2 class="sub">What you know so far</h2>
+      <dl class="kv" id="fd-known"></dl>
+      <div class="btnrow">
+        <button type="button" class="btn small" id="fd-example">Fill in an example</button>
+        <button type="button" class="btn small" id="fd-reset">Start over</button>
       </div>
-      <div class="row">
-        <div class="field grow">
-          <label for="ws-mac">Device MAC</label>
-          <input id="ws-mac" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="00:11:22:33:44:55">
-        </div>
-        <div class="field pfx">
-          <label for="ws-size">Ping data</label>
-          <input id="ws-size" type="text" inputmode="numeric" autocomplete="off" placeholder="1472">
-        </div>
-      </div>
-      <div class="field">
-        <label for="ws-iface">Laptop interface</label>
-        <input id="ws-iface" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
-      </div>
-      <p class="cap">The filters fill in with these values. Type a display filter in the bar above Wireshark's packet list.</p>
-      <p id="ws-error" class="error" role="alert" hidden></p>
     </section>
 
-    <details class="panel tests" open>
-      <summary>Measure data size</summary>
+    <details class="panel tests fstep" open>
+      <summary>Step 1 · Get ready</summary>
       <div class="tbody">
-        <div class="tbody" id="ws-size-list"></div>
-        <div class="inset">
-          <h3 class="sub">Reading sizes</h3>
-          <ul class="notes plain">
-            <li>Right-click <code>ip.len</code> or <code>data.len</code> in the packet details and choose <b>Apply as Column</b> to see sizes at a glance.</li>
-            <li><b>Statistics → Packet Lengths</b> shows how packet sizes are spread across the capture.</li>
-            <li>Wireshark shows frames without the 4-byte checksum, so a full-size frame reads 1514 bytes, or 1518 with a VLAN tag.</li>
-            <li>On the PC doing the capture, outgoing packets can show up far larger than the MTU, up to 64 KB. That's the network card's offloading, not a real packet on the wire. Turn it off with the command below, or capture from a switch mirror port.</li>
-          </ul>
-          <div id="ws-offload"></div>
+        <ul class="notes plain todo">
+          <li>Connect your laptop straight to the device with an Ethernet cable, or plug both into the same small switch. Check that the link lights come on at both ends. A device powered over Ethernet (PoE) needs a PoE switch or injector.</li>
+          <li><span class="os-windows">Turn off Wi-Fi from the taskbar</span><span class="os-macos">Turn off Wi-Fi from the menu bar</span><span class="os-linux">Turn off Wi-Fi in your network settings</span> so your laptop uses only the cable.</li>
+          <li>Find the device's MAC address on its label. It's 12 hex digits, often marked MAC or HW, like 00:11:22:33:44:55.</li>
+        </ul>
+        <p>Find the name of your laptop's wired connection:</p>
+        <div class="tbody" id="fd-ifaces"></div>
+        <div class="row">
+          <div class="field grow">
+            <label for="fd-iface">Wired interface on your laptop</label>
+            <input id="fd-iface" data-bind="iface" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+          </div>
+          <div class="field pfx os-windows">
+            <label for="fd-idx">Index</label>
+            <input id="fd-idx" data-bind="idx" type="text" inputmode="numeric" autocomplete="off" placeholder="12">
+          </div>
+        </div>
+        <div class="field">
+          <label for="fd-mac">Device MAC from the label (optional)</label>
+          <input id="fd-mac" data-bind="mac" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="00:11:22:33:44:55">
+        </div>
+        <p class="error fd-err" role="alert" hidden></p>
+        <aside class="why"><b>Why</b>A MAC address is set at the factory and printed on the label, and it doesn't change when the IP does. It lets you pick the device out of a capture or a neighbor table before you know anything else about it. Turning Wi-Fi off keeps your laptop from sending tests out the wrong connection.</aside>
+      </div>
+    </details>
+
+    <details class="panel tests fstep">
+      <summary>Step 2 · Try the quick wins</summary>
+      <div class="tbody">
+        <h3 class="sub">Check the label and the manual</h3>
+        <p>Many devices ship with a default address printed on the label or listed in the manual, such as 192.168.0.1, 192.168.1.1, or 10.0.0.1. If you have one, enter it below and go to step 5.</p>
+        <h3 class="sub">Let your laptop ask for an address</h3>
+        <p>Set the wired connection to get an address automatically (DHCP), then:</p>
+        <div class="tbody" id="fd-dhcp"></div>
+        <aside class="why"><b>Why</b>Your laptop broadcasts a DHCP Discover on the cable. Any DHCP server that hears it offers an address, a mask, and a gateway. Routers, firewalls, and access points often run a DHCP server and name themselves as the gateway, so the gateway you're given is a good first guess. If no server answers, Windows and macOS give themselves a 169.254 address instead.</aside>
+        <h3 class="sub">Try the maker's discovery tool</h3>
+        <p>Many cameras, recorders, PLCs, and access points have a free tool that finds them on the cable even when their IP doesn't match yours, for example Axis IP Utility, Hikvision SADP, Siemens PRONETA, or Rockwell's BOOTP/DHCP Server. Check the maker's support site.</p>
+        <div class="found">
+          <p class="found-title">Found it?</p>
+          <div class="row">
+            <div class="field grow">
+              <label for="fd-ip-2">Device IP</label>
+              <input id="fd-ip-2" data-bind="ip" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.64">
+            </div>
+            <div class="field pfx">
+              <label for="fd-prefix-2">Prefix</label>
+              <input id="fd-prefix-2" data-bind="prefix" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/24">
+            </div>
+          </div>
+          <p class="error fd-err" role="alert" hidden></p>
+          <p class="cap">Then go to step 5 to connect.</p>
         </div>
       </div>
     </details>
 
-    <details class="panel tests">
-      <summary>ARP</summary>
-      <div class="tbody" id="ws-arp-list"></div>
-    </details>
-
-    <details class="panel tests">
-      <summary>Find a device's address</summary>
+    <details class="panel tests fstep">
+      <summary>Step 3 · Listen for it with Wireshark</summary>
       <div class="tbody">
-        <p class="cap">For a camera, switch, PLC, or access point whose IP you don't know: connect it straight to your laptop, start capturing, then power it on.</p>
-        <div class="tbody" id="ws-find-list"></div>
-        <div class="inset">
-          <h3 class="sub">Capture filters</h3>
-          <p class="cap">These use a different syntax. Set one in the capture options before you start, to record only what you need.</p>
-          <div class="tbody" id="ws-capture"></div>
+        <p>Open Wireshark and double-click your wired interface, <b data-fill="iface"></b>, to start capturing. Then power-cycle the device, or unplug its cable for a few seconds and plug it back in. Type each filter into the bar above the packet list and press Enter.</p>
+        <div class="tbody" id="fd-listen"></div>
+        <div class="tbody os-macos os-linux" id="fd-tcpdump"></div>
+        <aside class="why"><b>Why</b>A device announces itself when it starts. Before using an address it sends ARP probes and a gratuitous ARP, and to reach its gateway it has to ARP for the gateway's MAC. ARP requests are broadcasts that carry the sender's IP in plain text, so your laptop sees them even before it's in the device's subnet.</aside>
+        <p class="cap">If you only saw ARP, start with a /24 prefix. It's the most common size for small networks and factory defaults.</p>
+        <div class="found">
+          <p class="found-title">Found it?</p>
+          <div class="row">
+            <div class="field grow">
+              <label for="fd-ip-3">Device IP</label>
+              <input id="fd-ip-3" data-bind="ip" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.64">
+            </div>
+            <div class="field pfx">
+              <label for="fd-prefix-3">Prefix</label>
+              <input id="fd-prefix-3" data-bind="prefix" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/24">
+            </div>
+          </div>
+          <p class="error fd-err" role="alert" hidden></p>
+          <p class="cap">Then go to step 5 to connect.</p>
         </div>
       </div>
     </details>
 
-    <details class="panel tests">
-      <summary>Connect your laptop to the device</summary>
+    <details class="panel tests fstep">
+      <summary>Step 4 · If the device stays quiet</summary>
       <div class="tbody">
-        <p id="ws-suggest" class="note"></p>
-        <ol class="steps" id="ws-steps"></ol>
+        <p>Devices set to a fixed address often send nothing until something talks to them. Try these in order.</p>
+        <h3 class="sub">Ask every IPv6 device to answer</h3>
+        <div class="tbody" id="fd-ipv6"></div>
+        <aside class="why"><b>Why</b>Every IPv6-capable interface gives itself an fe80:: link-local address and listens to ff02::1, the all-nodes address. One ping to ff02::1 reaches all of them, whatever IPv4 address they have. Browsers can't open fe80:: addresses, but ping and SSH can.</aside>
+        <h3 class="sub">Sweep a common address range</h3>
+        <p>Many devices ship in one of these ranges. Pick one, give your laptop an address in it, and sweep it.</p>
+        <div class="presets" id="fd-sweep-presets">
+          <button type="button" class="chip" data-sweep="192.168.1.0">192.168.1.x</button>
+          <button type="button" class="chip" data-sweep="192.168.0.0">192.168.0.x</button>
+          <button type="button" class="chip" data-sweep="10.0.0.0">10.0.0.x</button>
+        </div>
+        <div class="field">
+          <label for="fd-sweep">Range to sweep (a /24)</label>
+          <input id="fd-sweep" data-bind="sweep" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.0">
+        </div>
+        <p class="error fd-err" role="alert" hidden></p>
+        <div class="tbody" id="fd-sweep-cmds"></div>
+        <aside class="why"><b>Why</b>Before your laptop can ping an address on the cable, it has to ARP for it. Devices that ignore ping still answer ARP, so the neighbor table lists them even when the ping shows no reply. That's why the sweep ends by reading the table.</aside>
+        <h3 class="sub">Use the console port</h3>
+        <p>Switches, routers, and firewalls usually have a console port (RJ-45 or USB) that works with no network settings at all.</p>
+        <div class="tbody" id="fd-console"></div>
+        <h3 class="sub">Factory reset, as a last resort</h3>
+        <p>Holding the reset button, usually for 10 to 30 seconds while powered, puts the device back to the address in its manual or to DHCP. It also erases its settings, so get permission first.</p>
+        <div class="found">
+          <p class="found-title">Found it?</p>
+          <div class="row">
+            <div class="field grow">
+              <label for="fd-ip-4">Device IP</label>
+              <input id="fd-ip-4" data-bind="ip" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.64">
+            </div>
+            <div class="field pfx">
+              <label for="fd-prefix-4">Prefix</label>
+              <input id="fd-prefix-4" data-bind="prefix" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/24">
+            </div>
+          </div>
+          <p class="error fd-err" role="alert" hidden></p>
+          <p class="cap">Then go to step 5 to connect.</p>
+        </div>
+      </div>
+    </details>
+
+    <details class="panel tests fstep">
+      <summary>Step 5 · Connect</summary>
+      <div class="tbody">
+        <p class="note" id="fd-suggest"></p>
+        <ol class="steps" id="fd-connect"></ol>
+        <aside class="why"><b>Why</b>Your laptop delivers directly, using ARP, only to addresses inside its own subnet. Everything else goes to a gateway, and on a direct cable there isn't one. So your laptop needs an address in the device's subnet, and one no other device is using.</aside>
         <div class="inset">
           <h3 class="sub">Shortcuts</h3>
-          <div class="tbody" id="ws-shortcuts"></div>
+          <div class="tbody" id="fd-shortcuts"></div>
         </div>
       </div>
     </details>
@@ -916,8 +1021,8 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
   <!-- ================= Subnet solver ================= -->
   <div id="view-subnets" class="view" hidden>
     <header class="vhead">
-      <h1>Subnet solver</h1>
-      <p class="lede">Enter a network and how many subnets or hosts you need. You get the new prefix, each step of the math, and where the answer sits in the lookup tables.</p>
+      <h1>Subnetting practice</h1>
+      <p class="lede">Practice borrowing bits. Enter a network and how many subnets or hosts you need, work the problem yourself, then check each step of the math and where the answer sits in your lookup tables. It's also handy for planning how to split a network.</p>
     </header>
 
     <section class="panel controls" aria-label="Network to subnet">
@@ -1005,13 +1110,13 @@ textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4M8.5 10l2.5 2.5 4.5-5"/></svg>
       Check
     </a>
-    <a class="tab" href="#capture" data-view="capture">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12h4l2.5-6 4 12 2.5-6h7"/></svg>
-      Capture
+    <a class="tab" href="#find" data-view="find">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M1 12h4M19 12h4"/></svg>
+      Find
     </a>
     <a class="tab" href="#subnets" data-view="subnets">
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 3v18M3 12h18"/></svg>
-      Subnets
+      Practice
     </a>
   </div>
 </nav>

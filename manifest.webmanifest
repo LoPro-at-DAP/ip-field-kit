@@ -1,7 +1,7 @@
 {
   "name": "IP Field Kit",
   "short_name": "IP Kit",
-  "description": "Look up IPv4 address details, check a device's IP settings, and solve subnetting problems. Works offline.",
+  "description": "Find and connect to network equipment, look up IPv4 details, check device settings, and practice subnetting. Works offline.",
   "id": "./",
   "start_url": "./",
   "scope": "./",
@@ -35,6 +35,18 @@
   ],
   "shortcuts": [
     {
+      "name": "Find a device",
+      "short_name": "Find",
+      "url": "./#find",
+      "icons": [
+        {
+          "src": "icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
       "name": "Scan a photo for IPs",
       "short_name": "Scan",
       "url": "./#scan",
@@ -59,8 +71,8 @@
       ]
     },
     {
-      "name": "Subnet solver",
-      "short_name": "Subnets",
+      "name": "Subnetting practice",
+      "short_name": "Practice",
       "url": "./#subnets",
       "icons": [
         {

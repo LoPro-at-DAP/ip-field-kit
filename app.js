@@ -935,6 +935,48 @@ Wireless LAN adapter Wi-Fi:
         { cmd: 'arp -d *', tag: 'Run as administrator', what: 'Clears the ARP cache, for example after a router swap or after fixing a duplicate IP.' },
       ],
     },
+    macos: {
+      reach: [
+        { cmd: 'ifconfig {iface}', what: 'Shows the IP address (inet) and the mask in hex: 0xffffff00 is 255.255.255.0.',
+          out: [['bad', 'inet 169.254.12.34 netmask 0xffff0000', 'No DHCP lease. Check the cable, the VLAN, and the DHCP server.']] },
+        { cmd: 'route -n get default', what: 'Shows the default gateway and the interface it uses.',
+          out: [['ok', 'gateway: {gw}', 'The gateway is set.'],
+                ['bad', 'route: writing to routing socket: not in table', 'No default gateway, so the device can only reach its own subnet.']] },
+        { cmd: 'ping -c 4 {gw}', what: 'Tests the local link to the gateway.',
+          out: [['ok', '64 bytes from {gw}: icmp_seq=0 ttl=64 time=1.2 ms', 'The link and the gateway are working.'],
+                ['bad', 'ping: sendto: Host is down', 'The gateway never answered ARP. See the ARP tests.'],
+                ['warn', 'Request timeout for icmp_seq 0', 'No reply. The gateway may be down, or it may block ping. The ARP table tells you which.']] },
+        { cmd: 'ping -c 4 {target}', what: 'Tests routing past the gateway.',
+          out: [['bad', '4 packets transmitted, 0 packets received, 100.0% packet loss', 'The gateway answers but traffic stops beyond it. See the route tests.']] },
+        { cmd: 'dscacheutil -q host -a name example.com', what: 'Tests name lookups through the system resolver. No output means DNS is failing.' },
+        { cmd: 'scutil --dns | grep nameserver', what: 'Shows which DNS servers macOS is using.' },
+        { cmd: 'sudo ipconfig set {iface} DHCP', what: 'Asks DHCP for a new address on this interface.' },
+      ],
+      mtu: [
+        { cmd: 'ping -D -s {payload} -c 2 {target}', what: "-D sets Don't Fragment and -s sets the data size. {payload} bytes of data plus 28 bytes of headers makes a {mtu}-byte packet. macOS reports {payload8} bytes per reply because it counts the 8-byte ICMP header.",
+          out: [['ok', '{payload8} bytes from {target}: icmp_seq=0 ttl=117 time=14.2 ms', 'Every link on the path carries {mtu}-byte packets.'],
+                ['bad', 'ping: sendto: Message too long', "This Mac's own interface MTU is smaller than the packet, so it never left. Check it with networksetup -getMTU {iface}."],
+                ['bad', '36 bytes from 10.0.0.1: Frag needed and DF set (MTU 1492)', 'A router on the path has a smaller MTU, and it tells you the number.'],
+                ['warn', 'Request timeout for icmp_seq 0   (while smaller sizes get replies)', BLACK_HOLE]] },
+        { cmd: 'networksetup -getMTU {iface}', what: 'Shows the interface MTU.' },
+        { cmd: 'sudo networksetup -setMTU {iface} {mtu}', what: 'Sets the interface MTU. Use the largest MTU that passed the test.' },
+      ],
+      route: [
+        { cmd: 'netstat -rn -f inet', what: 'Lists the IPv4 routing table. Lines starting with default are default routes. When there are several (VPN, or Wi-Fi plus Ethernet), the service order in Network settings decides.' },
+        { cmd: 'route -n get {target}', what: 'Shows the gateway and interface macOS will use to reach {target}.',
+          out: [['ok', 'gateway: {gw}   interface: {iface}', 'Traffic leaves through the expected gateway.']] },
+        { cmd: 'traceroute -n {target}', what: 'Lists each router on the way. macOS sends UDP probes by default; add -I to use ICMP like Windows tracert.',
+          out: [['bad', ' 2  * * *   (on every line after hop 1)', "Traffic dies after the gateway. The gateway isn't forwarding, or has no route onward."]] },
+        { cmd: 'sudo route -n add -net <network>/<prefix> {gw}', what: 'Adds a route to another network through the gateway, until the next restart.' },
+      ],
+      arp: [
+        { cmd: 'arp -an', what: 'Lists the ARP cache. Look for the line with ({gw}).',
+          out: [['ok', '? ({gw}) at 0:11:22:33:44:55 on {iface} ifscope [ethernet]', 'The gateway answered ARP.'],
+                ['bad', '? ({gw}) at (incomplete) on {iface} ifscope [ethernet]', 'No ARP reply. That points to layer 2: the cable, switch port, VLAN, or Wi-Fi.']] },
+        { cmd: 'sudo arping -c 3 -I {iface} {gw}', what: 'Pings at the ARP level, so it works even when the gateway blocks ICMP. macOS doesn\'t include arping: install it with Homebrew (brew install arping).' },
+        { cmd: 'sudo arp -a -d', what: 'Clears the ARP cache, for example after a router swap or after fixing a duplicate IP.' },
+      ],
+    },
     linux: {
       reach: [
         { cmd: 'ip -4 addr show', what: 'Shows the IPv4 address and prefix on each interface.',
@@ -987,6 +1029,32 @@ Wireless LAN adapter Wi-Fi:
       ],
     },
   };
+  // Wireshark display filters shown in Check (data size under MTU, troubleshooting filters under ARP).
+  const WS_SIZE = [
+    ['icmp && data.len == {payload}', "Your Don't Fragment test pings with {payload} bytes of data."],
+    ['ip.len > 1400', 'Large packets. ip.len counts the IP header plus data, so a full-size packet is 1500.'],
+    ['frame.len > 1514', 'Frames bigger than standard Ethernet (a 1500-byte packet plus the 14-byte header): jumbo frames or "baby giants".'],
+    ['ip.flags.df == 1', "Packets with Don't Fragment set."],
+    ['ip.flags.mf == 1 || ip.frag_offset > 0', 'IP fragments. Something split a packet that was too big.'],
+    ['icmp.type == 3 && icmp.code == 4', '"Fragmentation needed" messages. The icmp.mtu field shows the MTU of the next hop.'],
+    ['tcp.flags.syn == 1 && tcp.options.mss_val < 1460', 'Connections with a reduced maximum segment size, a sign of PPPoE, a tunnel, or MSS clamping.'],
+    ['tcp.analysis.retransmission && tcp.len > 1300', 'Large segments being sent again, a typical sign of an MTU black hole.'],
+    ['gre || mpls || esp || vxlan || udp.port == 4500', 'Tunnel and label traffic that adds overhead. UDP 4500 is IPsec through NAT.'],
+  ];
+  const WS_ARP = [
+    ['arp.dst.proto_ipv4 == {gw}', 'Who is asking for the gateway, {gw}. Requests with no reply mean the gateway is down or on another VLAN.'],
+    ['arp.src.proto_ipv4 == {gw}', 'The gateway answering. Two different MACs here means two devices claim {gw}.'],
+    ['arp.src.proto_ipv4 == {ip}', 'The device announcing or answering for {ip}. Two different MACs here means a duplicate IP.'],
+    ['arp.duplicate-address-detected', 'Wireshark found two MACs claiming the same IP.'],
+    ['arp.src.proto_ipv4 == arp.dst.proto_ipv4', 'Gratuitous ARP: a device announcing its own IP, usually right after boot or a failover.'],
+    ['arp.opcode == 1 && !(arp.src.proto_ipv4 == {subnet}) && !(arp.src.proto_ipv4 == 0.0.0.0)', 'ARP requests from addresses outside {subnet}: a device set up with the wrong IP or mask for this network.'],
+  ];
+  const OFFLOAD = {
+    windows: { cmd: 'Disable-NetAdapterLso -Name "{iface}"', tag: 'PowerShell as administrator', what: 'Turns off large send offload so captured sizes match the wire. Turn it back on afterward with Enable-NetAdapterLso.' },
+    macos: { cmd: 'sudo sysctl -w net.inet.tcp.tso=0', what: 'Turns off TCP segmentation offload so captured sizes match the wire. Set it back to 1 afterward.' },
+    linux: { cmd: 'sudo ethtool -K {iface} tso off gso off gro off', what: 'Turns off segmentation offload so captured sizes match the wire. Run it again with "on" afterward.' },
+  };
+
   const MARKS = { ok: '✓', bad: '✕', warn: '!', info: 'i' };
   const MARK_WORDS = { ok: 'Pass', bad: 'Fail', warn: 'Warning', info: 'Note' };
   const fill = (tpl, v) => tpl.replace(/\{(\w+)\}/g, (all, k) => (v[k] !== undefined ? v[k] : all));
@@ -1005,20 +1073,25 @@ Wireless LAN adapter Wi-Fi:
   function initTests() {
     const saved = store.get('tests', {}) || {};
     const st = {
-      os: saved.os === 'linux' ? 'linux' : 'windows',
+      os: ['windows', 'macos', 'linux'].includes(saved.os) ? saved.os : 'windows',
       target: typeof saved.target === 'string' ? saved.target : '8.8.8.8',
       ifaceWin: typeof saved.ifaceWin === 'string' ? saved.ifaceWin : 'Ethernet',
+      ifaceMac: typeof saved.ifaceMac === 'string' ? saved.ifaceMac : 'en0',
       ifaceLinux: typeof saved.ifaceLinux === 'string' ? saved.ifaceLinux : 'eth0',
       mtu: typeof saved.mtu === 'string' ? saved.mtu : '1500',
     };
     const targetEl = $('ts-target'), ifaceEl = $('ts-iface'), mtuEl = $('ts-mtu');
+    const IFACE_KEY = { windows: 'ifaceWin', macos: 'ifaceMac', linux: 'ifaceLinux' };
+    const ifaceOf = () => st[IFACE_KEY[st.os]];
 
     function values() {
       const ip = parseIP($('ck-ip').value), gw = parseIP($('ck-gw').value);
+      const mk = parseMask($('ck-mask').value);
       const mtu = Number(st.mtu.trim());
       const okMtu = st.mtu.trim() !== '' && Number.isInteger(mtu) && mtu >= 68 && mtu <= 65535;
-      const iface = (st.os === 'windows' ? st.ifaceWin : st.ifaceLinux).trim();
+      const iface = ifaceOf().trim();
       return {
+        subnet: ip !== null && mk.p !== undefined ? `${ipStr(netOf(ip, mk.p))}/${mk.p}` : '<subnet>',
         ip: ip !== null ? ipStr(ip) : '<device-ip>',
         gw: gw !== null ? ipStr(gw) : '<gateway>',
         target: st.target.trim() || '<target>',
@@ -1037,6 +1110,9 @@ Wireless LAN adapter Wi-Fi:
       $('ts-mtu-cmds').innerHTML = set.mtu.map((t) => cmdHTML(t, v)).join('');
       $('ts-route').innerHTML = set.route.map((t) => cmdHTML(t, v)).join('');
       $('ts-arp').innerHTML = set.arp.map((t) => cmdHTML(t, v)).join('');
+      $('ts-ws-size').innerHTML = WS_SIZE.map(([cmd, what]) => cmdHTML({ cmd, what }, v)).join('');
+      $('ts-offload').innerHTML = cmdHTML(OFFLOAD[st.os], v);
+      $('ts-ws-arp').innerHTML = WS_ARP.map(([cmd, what]) => cmdHTML({ cmd, what }, v)).join('');
       $('ts-mtu-calc').innerHTML = v.okMtu
         ? `${v.mtu} MTU − 20 IP header − 8 ICMP header = <b>${v.payload}</b> bytes of ping data`
         : 'Enter an MTU from 68 to 65535.';
@@ -1047,8 +1123,8 @@ Wireless LAN adapter Wi-Fi:
     function syncInputs() {
       $('ts-os-' + st.os).checked = true;
       targetEl.value = st.target;
-      ifaceEl.value = st.os === 'windows' ? st.ifaceWin : st.ifaceLinux;
-      ifaceEl.placeholder = st.os === 'windows' ? 'Ethernet or Wi-Fi' : 'eth0 or wlan0';
+      ifaceEl.value = ifaceOf();
+      ifaceEl.placeholder = { windows: 'Ethernet or Wi-Fi', macos: 'en0', linux: 'eth0 or wlan0' }[st.os];
       mtuEl.value = st.mtu;
     }
 
@@ -1058,10 +1134,7 @@ Wireless LAN adapter Wi-Fi:
       render();
     }));
     targetEl.addEventListener('input', () => { st.target = targetEl.value; render(); });
-    ifaceEl.addEventListener('input', () => {
-      if (st.os === 'windows') st.ifaceWin = ifaceEl.value; else st.ifaceLinux = ifaceEl.value;
-      render();
-    });
+    ifaceEl.addEventListener('input', () => { st[IFACE_KEY[st.os]] = ifaceEl.value; render(); });
     mtuEl.addEventListener('input', () => { st.mtu = mtuEl.value; render(); });
     const stepMtu = (d) => {
       const n = Number(st.mtu);
@@ -1076,7 +1149,7 @@ Wireless LAN adapter Wi-Fi:
       mtuEl.value = st.mtu;
       render();
     }));
-    ['ck-ip', 'ck-gw'].forEach((id) => $(id).addEventListener('input', render));
+    ['ck-ip', 'ck-mask', 'ck-gw'].forEach((id) => $(id).addEventListener('input', render));
 
     syncInputs();
     render();
@@ -1202,46 +1275,7 @@ Wireless LAN adapter Wi-Fi:
     render();
   }
 
-  // ---------- Capture (Wireshark) ----------
-  const WS_SIZE = [
-    ['icmp && data.len == {size}', "Your Don't Fragment pings with {size} bytes of data, from ping -f -l {size} or ping -M do -s {size}."],
-    ['ip.len > 1400', 'Large packets. ip.len counts the IP header plus data, so a full-size packet is 1500.'],
-    ['frame.len > 1514', 'Frames bigger than standard Ethernet (a 1500-byte packet plus the 14-byte header): jumbo frames or "baby giants".'],
-    ['ip.flags.df == 1', "Packets with Don't Fragment set."],
-    ['ip.flags.mf == 1 || ip.frag_offset > 0', 'IP fragments. Something split a packet that was too big.'],
-    ['icmp.type == 3 && icmp.code == 4', '"Fragmentation needed" messages. The icmp.mtu field shows the MTU of the next hop.'],
-    ['tcp.flags.syn == 1 && tcp.options.mss_val < 1460', 'Connections with a reduced maximum segment size, a sign of PPPoE, a tunnel, or MSS clamping.'],
-    ['tcp.analysis.retransmission && tcp.len > 1300', 'Large segments being sent again, a typical sign of an MTU black hole.'],
-    ['gre || mpls || esp || vxlan || udp.port == 4500', 'Tunnel and label traffic that adds overhead. UDP 4500 is IPsec through NAT.'],
-  ];
-  const WS_ARP = [
-    ['arp', 'All ARP traffic.'],
-    ['arp.opcode == 1', 'Requests: "Who has this IP?"'],
-    ['arp.opcode == 2', 'Replies: "This IP is at this MAC."'],
-    ['arp.dst.proto_ipv4 == {ip}', 'Who is asking for {ip}.'],
-    ['arp.src.proto_ipv4 == {ip}', '{ip} announcing itself or answering. Two different MACs here means a duplicate IP.'],
-    ['arp.src.proto_ipv4 == arp.dst.proto_ipv4', 'Gratuitous ARP: a device announcing its own IP, usually right after boot or a failover.'],
-    ['arp.src.proto_ipv4 == 0.0.0.0', 'ARP probes: a device checking whether an IP is free before using it. The target IP is the one it wants.'],
-    ['arp.duplicate-address-detected', 'Wireshark found two MACs claiming the same IP.'],
-    ['arp.opcode == 1 && !(arp.src.proto_ipv4 == {subnet}) && !(arp.src.proto_ipv4 == 0.0.0.0)', 'ARP requests from addresses outside {subnet}: a device set up with the wrong IP or mask for this network.'],
-  ];
-  const WS_FIND = [
-    ['eth.src == {mac}', 'Everything the device sends, using the MAC on its label.'],
-    ['arp && eth.src == {mac}', 'Its ARP traffic. The sender IP is its address. The target IP is often its gateway, which hints at the subnet.'],
-    ['dhcp.option.dhcp == 1', 'DHCP Discover: a device looking for a DHCP server. dhcp.option.requested_ip_address shows the last IP it had. Wireshark before version 3.0 calls this bootp.'],
-    ['ip.addr == 169.254.0.0/16', 'IPv4 link-local (APIPA): a device that gave itself an address because it found no DHCP server.'],
-    ['ipv6.src == fe80::/10', 'IPv6 link-local. Nearly every modern device has one, even with no IPv4 set up.'],
-    ['icmpv6.type == 135 && ipv6.src == ::', 'IPv6 duplicate-address checks, which show the address a device is about to use.'],
-    ['icmpv6.type >= 133 && icmpv6.type <= 136', 'IPv6 neighbor discovery: router and neighbor solicitations and advertisements.'],
-    ['lldp || cdp', 'Switches, phones, and access points announcing their name, port, and management IP (lldp.mgn.addr.ip4).'],
-    ['mdns || llmnr || nbns || ssdp', 'Devices announcing names and services, such as printers, cameras, and IoT gear.'],
-    ['eth.dst == ff:ff:ff:ff:ff:ff', 'All broadcast traffic, where most discovery happens.'],
-  ];
-  const WS_CAPTURE = [
-    ['arp or udp port 67 or udp port 68 or icmp6 or udp port 5353 or ether proto 0x88cc', 'Discovery traffic only: ARP, DHCP, IPv6 neighbor discovery, mDNS, and LLDP (EtherType 0x88cc).'],
-    ['ether host {mac}', 'Only frames to or from the device.'],
-  ];
-
+  // ---------- Find a device ----------
   function normMac(str) {
     const hex = String(str).replace(/[^0-9a-f]/gi, '');
     return hex.length === 12 ? hex.toLowerCase().match(/../g).join(':') : null;
@@ -1266,114 +1300,251 @@ Wireless LAN adapter Wi-Fi:
     return pick === undefined ? null : pick;
   }
 
-  function initCapture() {
-    const saved = store.get('capture', {}) || {};
+  // Wireshark display filters for spotting a device, with what each one looks like in the Info column.
+  const LISTEN = [
+    { cmd: 'arp or udp port 67 or udp port 68 or icmp6 or udp port 5353 or ether proto 0x88cc', tag: 'Capture filter', what: 'Optional. Set it in Capture Options before you start, to record only discovery traffic.' },
+    { cmd: 'arp', what: 'ARP: devices asking who owns an address, and announcing their own.',
+      out: [['ok', 'Who has 192.168.1.1? Tell 192.168.1.64', 'The device is 192.168.1.64, the "Tell" address. It\'s looking for 192.168.1.1, probably its gateway, so its subnet is likely 192.168.1.0/24.'],
+            ['ok', 'Gratuitous ARP for 192.168.1.64 (Request)', 'The device announcing its own address, usually right after it boots.'],
+            ['ok', 'Who has 192.168.1.64? Tell 0.0.0.0', "An ARP probe: the device checking that 192.168.1.64 is free before using it. That's the address it wants."]] },
+    { cmd: 'dhcp', what: 'DHCP: a device asking for an address. Wireshark before version 3.0 calls this bootp.',
+      out: [['info', 'DHCP Discover - Transaction ID 0x3903f326', 'The device wants an address and has none yet. Click it and expand Option 50, Requested IP Address, to see the last address it had.']] },
+    { cmd: 'ip.addr == 169.254.0.0/16', what: 'IPv4 link-local: a device that found no DHCP server and gave itself a 169.254 address. See the shortcut in step 5.' },
+    { cmd: 'lldp || cdp', what: "Switches, phones, and access points announcing their name and the port you're plugged into. Expand the packet and look for Management Address: that's its IP." },
+    { cmd: 'mdns || ssdp || nbns || llmnr', what: "Devices advertising a name or a service, such as camera-1234.local or a printer. The Source column is the device's IP." },
+    { cmd: 'eth.src == {mac}', what: 'Everything sent by the MAC on the label. Once the device uses an IP, it shows in the Source column.' },
+    { cmd: 'ipv6.src == fe80::/10', what: 'IPv6 link-local addresses. Most devices have one even with no IPv4 set up. See step 4.' },
+  ];
+  const TCPDUMP = { cmd: "sudo tcpdump -eni {iface} 'arp or port 67 or port 68'", what: 'No Wireshark? This prints the same ARP and DHCP traffic in the terminal. -e adds MAC addresses.',
+    out: [['ok', 'ARP, Request who-has 192.168.1.1 tell 192.168.1.64, length 46', 'Same meaning as in Wireshark: the device is 192.168.1.64.']] };
+  const NMAP = { cmd: 'nmap -sn {net3}.0/24', what: 'If Nmap is installed: lists every device that answers. Run it as administrator, or with sudo, to see MAC addresses too.' };
+  const CONSOLE_TAIL = { p: 'Most consoles use 9600 baud, 8 data bits, no parity, and 1 stop bit. On Cisco gear, show ip interface brief lists every interface with its IP.' };
+
+  const FIND = {
+    windows: {
+      ifaces: [
+        { cmd: 'ipconfig /all', what: 'Lists every adapter. The wired one is usually called "Ethernet". Its Physical Address is your laptop\'s MAC, not the device\'s.' },
+        { cmd: 'netsh interface ipv6 show interfaces', what: 'The Idx column is the interface index. Enter the number for your wired adapter in Index; the IPv6 steps need it.' },
+      ],
+      dhcp: [
+        { cmd: 'ipconfig /renew "{iface}"', what: 'Asks for an address over the cable. Then read the result:',
+          out: [['ok', 'Default Gateway . . . . . . . . . : 192.168.1.1', 'A DHCP server answered. Try that gateway address first: it is often the device itself.'],
+                ['bad', 'Autoconfiguration IPv4 Address. . : 169.254.12.34', 'No DHCP server on the cable. Go on to step 3.']] },
+      ],
+      ipv6: [
+        { cmd: 'ping ff02::1%{idx}', what: 'Pings every IPv6 device on the cable. Windows may show only one reply, or time out. The answers still land in the neighbor list.' },
+        { cmd: 'netsh interface ipv6 show neighbors interface={idx}', what: 'Lists IPv6 neighbors. Look for an fe80:: address whose Physical Address matches the MAC on the label.',
+          out: [['ok', 'fe80::211:22ff:fe33:4455    00-11-22-33-44-55    Reachable', 'That is the device. You can ping it or SSH to it with this address.']] },
+      ],
+      sweep: [
+        { cmd: 'for /L %i in (1,1,254) do @ping -n 1 -w 200 {net3}.%i | find "TTL="', what: 'Pings {net3}.1 through {net3}.254 and prints the ones that reply. In a .bat file, write %%i instead of %i.' },
+        { cmd: 'arp -a -N {laptop}', what: 'Lists every device that answered ARP during the sweep, including ones that ignore ping. Match the MAC to the label.' },
+      ],
+      console: [
+        { p: 'Plug in the console cable, then open Device Manager and look under Ports (COM & LPT) for its COM number.' },
+        { p: 'In PuTTY, choose Serial, enter that COM port (for example COM3) and speed 9600, then click Open. Press Enter a few times to get a prompt.' },
+      ],
+      free: { cmd: 'ping -n 2 {laptop}', what: 'No reply, and no entry for {laptop} in arp -a afterward, means nothing is using it.' },
+      set: { cmd: 'netsh interface ipv4 set address name="{iface}" static {laptop} {mask}', tag: 'Run as administrator', what: 'Gives your laptop {laptop} on the wired connection. No gateway is needed on a direct cable.' },
+      connect: { cmd: 'ping -n 4 {ip}', what: 'Then open http://{ip} in a browser, or connect with SSH or the maker\'s tool.' },
+      undo: { cmd: 'netsh interface ipv4 set address name="{iface}" source=dhcp', tag: 'Run as administrator', what: 'Puts the wired connection back on DHCP.' },
+      ssh6: { cmd: 'ssh admin@{ll}%{idx}', what: 'SSH over IPv6 link-local needs no address setup at all. The fe80 address shown is built from the MAC; many newer devices use a random one, so use the one from step 4.' },
+    },
+    macos: {
+      ifaces: [
+        { cmd: 'networksetup -listallhardwareports', what: 'Lists each port with its device name. The wired one is usually "Ethernet" or a USB adapter, with a device such as en5. Enter that device name.' },
+      ],
+      dhcp: [
+        { cmd: 'sudo ipconfig set {iface} DHCP', what: 'Asks for an address over the cable.' },
+        { cmd: 'ipconfig getpacket {iface}', what: 'Shows the DHCP answer, if one came.',
+          out: [['ok', 'router (ip_mult): {192.168.1.1}', 'A DHCP server answered and named 192.168.1.1 as the router. Try it first: it is often the device itself.'],
+                ['bad', '(no output)', 'No DHCP server answered, and the Mac gives itself a 169.254 address. Go on to step 3.']] },
+      ],
+      ipv6: [
+        { cmd: 'ping6 -c 3 ff02::1%{iface}', what: 'Pings every IPv6 device on the cable. Each one replies from its fe80:: address.',
+          out: [['ok', '16 bytes from fe80::211:22ff:fe33:4455%en5, icmp_seq=0 hlim=64 time=0.9 ms', 'A device answered. The next command matches it to a MAC.']] },
+        { cmd: 'ndp -an', what: 'Lists IPv6 neighbors with their MAC addresses. Find the MAC from the label.' },
+      ],
+      sweep: [
+        { cmd: 'for i in {1..254}; do ping -c 1 -t 1 {net3}.$i > /dev/null & done; wait; arp -an | grep -v incomplete', what: 'Pings {net3}.1 through {net3}.254 at once, then lists every device that answered ARP, including ones that ignore ping. Match the MAC to the label.' },
+      ],
+      console: [
+        { cmd: 'ls /dev/tty.usb*', what: 'Shows the console cable, for example /dev/tty.usbserial-A1B2C3.' },
+        { cmd: 'screen /dev/tty.usbserial-A1B2C3 9600', what: 'Opens the console. Press Return a few times for a prompt. To quit, press Control-A, then K, then Y.' },
+      ],
+      free: { cmd: 'ping -c 2 {laptop}; arp -n {laptop}', what: 'No reply and "no entry" from arp means nothing is using {laptop}.' },
+      set: { cmd: 'sudo ifconfig {iface} alias {laptop} netmask {mask}', what: 'Adds {laptop} alongside your current address until you remove it or restart. No gateway is needed on a direct cable.' },
+      connect: { cmd: 'ping -c 4 {ip}', what: 'Then open http://{ip} in a browser, or connect with SSH or the maker\'s tool.' },
+      undo: { cmd: 'sudo ifconfig {iface} -alias {laptop}', what: 'Removes the temporary address.' },
+      ssh6: { cmd: 'ssh admin@{ll}%{iface}', what: 'SSH over IPv6 link-local needs no address setup at all. The fe80 address shown is built from the MAC; many newer devices use a random one, so use the one from step 4.' },
+    },
+    linux: {
+      ifaces: [
+        { cmd: 'ip -br link', what: 'Lists interfaces. Wired ones usually start with en or eth, for example enp3s0 or eth0. Wireless ones start with wl.' },
+      ],
+      dhcp: [
+        { p: 'Set the wired connection to Automatic (DHCP) in your network settings, then unplug and replug the cable.' },
+        { cmd: 'ip -4 addr show dev {iface}', what: 'Shows the address you got.',
+          out: [['bad', 'No inet line, or inet 169.254.12.34/16', 'No DHCP server answered. Go on to step 3.']] },
+        { cmd: 'ip -4 route show default dev {iface}', what: 'Shows the gateway the DHCP server handed out.',
+          out: [['ok', 'default via 192.168.1.1 proto dhcp metric 100', 'Try 192.168.1.1 first: it is often the device itself.']] },
+      ],
+      ipv6: [
+        { cmd: 'ping -6 -c 3 ff02::1%{iface}', what: 'Pings every IPv6 device on the cable. Each one replies from its fe80:: address.',
+          out: [['ok', '64 bytes from fe80::211:22ff:fe33:4455%eth0: icmp_seq=1 ttl=64 time=0.9 ms (DUP!)', 'A device answered. DUP! only means more than one did.']] },
+        { cmd: 'ip -6 neigh show dev {iface}', what: 'Lists IPv6 neighbors with their MAC addresses (lladdr). Find the MAC from the label.' },
+      ],
+      sweep: [
+        { cmd: 'for i in $(seq 1 254); do ping -c 1 -W 1 {net3}.$i > /dev/null & done; wait; ip -4 neigh show dev {iface} | grep -v FAILED', what: 'Pings {net3}.1 through {net3}.254 at once, then lists every device that answered ARP, including ones that ignore ping. Match the MAC to the label.' },
+        { cmd: 'sudo arp-scan -I {iface} {net3}.0/24', what: 'Faster, and it works without changing your laptop\'s address. Install it first with sudo apt install arp-scan on Debian or Ubuntu.' },
+      ],
+      console: [
+        { cmd: 'ls /dev/ttyUSB*', what: 'Shows the console cable, usually /dev/ttyUSB0.' },
+        { cmd: 'sudo screen /dev/ttyUSB0 9600', what: 'Opens the console. Press Enter a few times for a prompt. To quit, press Ctrl-A, then K, then Y. Install screen first if it is missing.' },
+      ],
+      free: { cmd: 'sudo arping -D -c 3 -I {iface} {laptop}', what: '"Received 0 response(s)" means nothing is using {laptop}. If arping is missing on Debian or Ubuntu, install it with sudo apt install iputils-arping.' },
+      set: { cmd: 'sudo ip addr add {laptop}/{prefix} dev {iface}', what: 'Adds {laptop} alongside any address you already have. No gateway is needed on a direct cable.' },
+      connect: { cmd: 'ping -c 4 {ip}', what: 'Then open http://{ip} in a browser, or connect with SSH or the maker\'s tool.' },
+      undo: { cmd: 'sudo ip addr del {laptop}/{prefix} dev {iface}', what: 'Removes the temporary address.' },
+      ssh6: { cmd: 'ssh admin@{ll}%{iface}', what: 'SSH over IPv6 link-local needs no address setup at all. The fe80 address shown is built from the MAC; many newer devices use a random one, so use the one from step 4.' },
+    },
+  };
+
+  function initFind() {
+    const OSES = ['windows', 'macos', 'linux'];
+    const saved = store.get('find', {}) || {};
+    const str = (v, d) => (typeof v === 'string' ? v : d);
     const st = {
-      os: saved.os === 'linux' ? 'linux' : 'windows',
-      ip: typeof saved.ip === 'string' ? saved.ip : '192.168.0.10',
-      prefix: typeof saved.prefix === 'string' ? saved.prefix : '/24',
-      mac: typeof saved.mac === 'string' ? saved.mac : '00:11:22:33:44:55',
-      size: typeof saved.size === 'string' ? saved.size : '1472',
-      ifaceWin: typeof saved.ifaceWin === 'string' ? saved.ifaceWin : 'Ethernet',
-      ifaceLinux: typeof saved.ifaceLinux === 'string' ? saved.ifaceLinux : 'eth0',
+      os: OSES.includes(saved.os) ? saved.os : 'windows',
+      iface: {
+        windows: str(saved.iface && saved.iface.windows, 'Ethernet'),
+        macos: str(saved.iface && saved.iface.macos, ''),
+        linux: str(saved.iface && saved.iface.linux, ''),
+      },
+      idx: str(saved.idx, ''),
+      mac: str(saved.mac, ''),
+      ip: str(saved.ip, ''),
+      prefix: str(saved.prefix, ''),
+      sweep: str(saved.sweep, '192.168.1.0'),
     };
-    const f = { ip: $('ws-ip'), prefix: $('ws-prefix'), mac: $('ws-mac'), size: $('ws-size'), iface: $('ws-iface') };
+    const view = $('view-find');
+    const bound = [...view.querySelectorAll('[data-bind]')];
+    const IFACE_HINT = { windows: 'Ethernet', macos: 'for example en5', linux: 'for example eth0 or enp3s0' };
 
     function values() {
       const errs = [];
-      const ipN = parseIP(st.ip);
-      if (ipN === null) errs.push(st.ip.trim() ? `"${st.ip.trim()}" isn't a complete IPv4 address.` : 'Enter the device or gateway IP.');
+      const ipText = st.ip.trim();
+      const ipN = parseIP(ipText);
+      if (ipText && ipN === null) errs.push(`"${ipText}" isn't a complete IPv4 address.`);
       const mk = parseMask(st.prefix);
-      let p = mk.p !== undefined ? mk.p : null;
-      if (p === null) errs.push(mk.empty ? 'Enter the prefix, like /24.' : mk.error);
-      // Link-local is always a /16. Pick the laptop address near the device, away from the reserved first and last /24.
+      let p = null, guessed = false;
+      if (mk.p !== undefined) p = mk.p;
+      else if (mk.empty) { if (ipN !== null) { p = 24; guessed = true; } }
+      else errs.push(mk.error);
       const apipa = ipN !== null && netOf(ipN, 16) === parseIP('169.254.0.0');
-      if (apipa) p = 16;
-      const mac = normMac(st.mac);
-      if (!mac) errs.push(st.mac.trim() ? `"${st.mac.trim()}" isn't a MAC address. Use 12 hex digits, like 00:11:22:33:44:55.` : 'Enter the device MAC.');
-      const size = Number(st.size.trim());
-      const okSize = st.size.trim() !== '' && Number.isInteger(size) && size >= 0 && size <= 65500;
-      if (!okSize) errs.push('Enter the ping data size as a whole number from 0 to 65500.');
-      const iface = (st.os === 'windows' ? st.ifaceWin : st.ifaceLinux).trim() || (st.os === 'windows' ? 'Ethernet' : 'eth0');
+      if (apipa) { p = 16; guessed = false; }
+      const macText = st.mac.trim();
+      const mac = normMac(macText);
+      if (macText && !mac) errs.push(`"${macText}" isn't a MAC address. Use 12 hex digits, like 00:11:22:33:44:55.`);
+      const sw = st.sweep.trim().match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\.(?:\d{1,3}|x))?(?:\/24)?$/i);
+      const net3 = sw && [sw[1], sw[2], sw[3]].every((o) => Number(o) <= 255) ? `${Number(sw[1])}.${Number(sw[2])}.${Number(sw[3])}` : null;
+      if (!net3) errs.push('Enter the range to sweep as the first three numbers of an address, like 192.168.1.0.');
+      const iface = st.iface[st.os].trim();
       const laptop = ipN !== null && p !== null ? laptopAddress(ipN, apipa ? 24 : p) : null;
       return {
-        errs, devN: ipN, p, mac: mac || '<mac>', iface, laptopN: laptop, apipa,
+        errs, ipN, p, guessed, apipa, laptopN: laptop, macOk: !!mac, ifaceOk: !!iface,
         ip: ipN !== null ? ipStr(ipN) : '<device-ip>',
-        subnet: ipN !== null && p !== null ? `${ipStr(netOf(ipN, p))}/${p}` : '<subnet>',
-        size: okSize ? String(size) : '<size>',
         prefix: p !== null ? String(p) : '<prefix>',
         mask: p !== null ? maskStr(p) : '<mask>',
         laptop: laptop !== null ? ipStr(laptop) : '<laptop-ip>',
-        ll: mac ? eui64(mac) : 'fe80::<device-id>',
+        mac: mac || '<mac>',
+        ll: mac ? eui64(mac) : '<fe80-address>',
+        iface: iface || '<interface>',
+        idx: st.idx.trim() || '<index>',
+        net3: net3 || '<a.b.c>',
       };
     }
 
-    const list = (rows, v) => rows.map(([cmd, what]) => cmdHTML({ cmd, what }, v)).join('');
-
-    function steps(v) {
-      const win = st.os === 'windows';
-      const c = (t) => cmdHTML(t, v);
-      return [
-        ['Start capturing, then power on the device', '<p>Boot is when a device sends gratuitous ARP, DHCP requests, and LLDP. Use the filters under "Find a device\'s address" to spot them.</p>'],
-        ['Enter its address above', "<p>Put the IP you found in <b>Device or gateway IP</b>. If you only learned its gateway, a /24 around that gateway is a reasonable first guess.</p>"],
-        ["Check that your laptop's address is free", win
-          ? c({ cmd: 'ping -n 2 {laptop}', what: 'No reply, and no entry for {laptop} in arp -a afterward, means nothing is using it.' })
-          : c({ cmd: 'sudo arping -D -c 3 -I {iface} {laptop}', what: '"Received 0 response(s)" means nothing is using {laptop}. If arping is missing on Debian or Ubuntu, install it with sudo apt install iputils-arping.' })],
-        ['Give your laptop the address', win
-          ? c({ cmd: 'netsh interface ipv4 set address name="{iface}" static {laptop} {mask}', tag: 'Run as administrator', what: 'No gateway is needed on a direct link.' })
-          : c({ cmd: 'sudo ip addr add {laptop}/{prefix} dev {iface}', what: 'Adds the address alongside any you already have. No gateway is needed on a direct link.' })],
-        ['Connect', c({ cmd: win ? 'ping -n 4 {ip}' : 'ping -c 4 {ip}', what: 'Then open http://{ip} in a browser, or connect with SSH or the vendor tool.' })],
-        ['Put your laptop back afterward', win
-          ? c({ cmd: 'netsh interface ipv4 set address name="{iface}" source=dhcp', tag: 'Run as administrator', what: 'Returns the interface to DHCP.' })
-          : c({ cmd: 'sudo ip addr del {laptop}/{prefix} dev {iface}', what: 'Removes the temporary address.' })],
-      ];
-    }
+    const item = (t, v) => (t.p ? `<p>${esc(fill(t.p, v))}</p>` : cmdHTML(t, v));
 
     function render() {
       const v = values();
-      $('ws-size-list').innerHTML = list(WS_SIZE, v);
-      $('ws-offload').innerHTML = st.os === 'windows'
-        ? cmdHTML({ cmd: 'Disable-NetAdapterLso -Name "{iface}"', tag: 'PowerShell as administrator', what: 'Turns off large send offload so captured sizes match the wire. Re-enable it afterward with Enable-NetAdapterLso.' }, v)
-        : cmdHTML({ cmd: 'sudo ethtool -K {iface} tso off gso off gro off', what: 'Turns off segmentation offload so captured sizes match the wire. Run it again with "on" afterward.' }, v);
-      $('ws-arp-list').innerHTML = list(WS_ARP, v);
-      $('ws-find-list').innerHTML = list(WS_FIND, v);
-      $('ws-capture').innerHTML = list(WS_CAPTURE, v);
+      const F = FIND[st.os];
+      $('fd-ifaces').innerHTML = F.ifaces.map((t) => item(t, v)).join('');
+      $('fd-dhcp').innerHTML = F.dhcp.map((t) => item(t, v)).join('');
+      $('fd-listen').innerHTML = LISTEN.map((t) => item(t, v)).join('');
+      $('fd-tcpdump').innerHTML = st.os === 'windows' ? '' : item(TCPDUMP, v);
+      $('fd-ipv6').innerHTML = F.ipv6.map((t) => item(t, v)).join('');
 
-      $('ws-error').hidden = !v.errs.length;
-      $('ws-error').textContent = v.errs.join(' ');
-      const sug = $('ws-suggest');
-      if (v.devN === null || v.p === null) sug.textContent = "Enter the device's IP and prefix above to get a suggested laptop address.";
-      else if (v.apipa) sug.innerHTML = `${esc(v.ip)} is a link-local (APIPA) address. Leave your laptop on DHCP with no DHCP server connected and it takes a 169.254 address of its own within about a minute, or set <b>${esc(v.laptop)}/16</b> by hand.`;
+      // The sweep runs from a temporary laptop address in the chosen /24.
+      const sv = { ...v, laptop: v.net3 === '<a.b.c>' ? '<laptop-ip>' : `${v.net3}.250`, mask: '255.255.255.0', prefix: '24' };
+      $('fd-sweep-cmds').innerHTML =
+        `<p>First give your laptop ${esc(sv.laptop)}/24:</p>` + item(F.set, sv) +
+        '<p>Then sweep the range:</p>' + F.sweep.map((t) => item(t, sv)).join('') + item(NMAP, sv) +
+        `<p class="cap">Afterward, remove ${esc(sv.laptop)} with the last command in step 5, or try the next range.</p>`;
+      $('fd-console').innerHTML = [...F.console, CONSOLE_TAIL].map((t) => item(t, v)).join('');
+
+      const sug = $('fd-suggest');
+      if (v.ipN === null) sug.textContent = "Enter the device's IP in any \"Found it?\" box first. The commands below fill in from it.";
+      else if (v.apipa) sug.innerHTML = `${esc(v.ip)} is a link-local (APIPA) address. Your laptop can join it at <b>${esc(v.laptop)}/16</b>, or see the first shortcut below.`;
       else if (v.laptopN === null) sug.textContent = `A /${v.p} has no room for a second address. Check the prefix.`;
-      else sug.innerHTML = `Suggested laptop address: <b>${esc(v.laptop)}/${v.p}</b> (mask ${esc(v.mask)}). It's in the same subnet as ${esc(v.ip)}. Confirm it's free in step 3.`;
+      else sug.innerHTML = `Use <b>${esc(v.laptop)}/${v.p}</b> (mask ${esc(v.mask)}) for your laptop. It's in the same subnet as ${esc(v.ip)}${v.guessed ? ', assuming a /24' : ''}.`;
 
-      $('ws-steps').innerHTML = steps(v).map(([t, b]) => `<li><h3>${esc(t)}</h3><div class="step-body">${b}</div></li>`).join('');
+      $('fd-connect').innerHTML = [
+        ["Check that your laptop's address is free", F.free],
+        ['Give your laptop the address', F.set],
+        ['Connect', F.connect],
+        ['Undo it when you finish', F.undo],
+      ].map(([title, t]) => `<li><h3>${esc(title)}</h3><div class="step-body">${item(t, v)}</div></li>`).join('');
 
-      const win = st.os === 'windows';
-      $('ws-shortcuts').innerHTML =
-        `<p class="cap">If the device has a 169.254 address, leave your laptop on DHCP with no DHCP server connected. It gives itself a 169.254 address too, and both land in the same /16.</p>` +
-        cmdHTML(win
-          ? { cmd: 'ping {ll}%12', what: 'IPv6 link-local needs no setup on either side. Replace 12 with your interface index from netsh interface ipv6 show interfaces. The address shown is built from the MAC (EUI-64); many newer devices use a random one, so read the real one from the capture.' }
-          : { cmd: 'ping -c 4 {ll}%{iface}', what: 'IPv6 link-local needs no setup on either side. The address shown is built from the MAC (EUI-64); many newer devices use a random one, so read the real one from the capture.' }, v);
-      store.set('capture', st);
+      $('fd-shortcuts').innerHTML =
+        '<p>If the device has a 169.254 address, leave your laptop on DHCP with no DHCP server connected. After about a minute it gives itself a 169.254 address too, and both land in the same /16.</p>' +
+        item(F.ssh6, v);
+
+      const known = (ok, val, none) => (ok ? esc(val) : `<span class="muted">${none}</span>`);
+      $('fd-known').innerHTML = kvRows([
+        ['Wired interface', known(v.ifaceOk, v.iface + (st.os === 'windows' && st.idx.trim() ? ` (index ${st.idx.trim()})` : ''), 'Not set yet, see step 1'), null],
+        ['Device MAC', known(v.macOk, v.mac, 'Not found yet'), null],
+        ['Device IP', known(v.ipN !== null, `${v.ip}/${v.prefix}${v.guessed ? ' (prefix guessed)' : ''}`, 'Not found yet'), null],
+        ['Your laptop', known(v.laptopN !== null, `${v.laptop}/${v.prefix}`, 'Set once the device IP is known'), null],
+      ]);
+      view.querySelectorAll('[data-fill]').forEach((el) => { el.textContent = v[el.dataset.fill]; });
+      view.querySelectorAll('.fd-err').forEach((el) => { el.hidden = !v.errs.length; el.textContent = v.errs.join(' '); });
+      store.set('find', st);
     }
 
     function sync() {
-      $('ws-os-' + st.os).checked = true;
-      f.ip.value = st.ip;
-      f.prefix.value = st.prefix;
-      f.mac.value = st.mac;
-      f.size.value = st.size;
-      f.iface.value = st.os === 'windows' ? st.ifaceWin : st.ifaceLinux;
-      f.iface.placeholder = st.os === 'windows' ? 'Ethernet' : 'eth0';
+      view.dataset.os = st.os;
+      $('fd-os-' + st.os).checked = true;
+      bound.forEach((el) => {
+        const k = el.dataset.bind;
+        const val = k === 'iface' ? st.iface[st.os] : st[k];
+        if (el.value !== val) el.value = val;
+      });
+      $('fd-iface').placeholder = IFACE_HINT[st.os];
     }
 
-    ['ip', 'prefix', 'mac', 'size'].forEach((k) => f[k].addEventListener('input', () => { st[k] = f[k].value; render(); }));
-    f.iface.addEventListener('input', () => {
-      if (st.os === 'windows') st.ifaceWin = f.iface.value; else st.ifaceLinux = f.iface.value;
+    bound.forEach((el) => el.addEventListener('input', () => {
+      const k = el.dataset.bind;
+      if (k === 'iface') st.iface[st.os] = el.value; else st[k] = el.value;
+      bound.forEach((o) => { if (o !== el && o.dataset.bind === k) o.value = el.value; });
+      render();
+    }));
+    document.querySelectorAll('input[name="fd-os"]').forEach((r) => r.addEventListener('change', () => { st.os = r.value; sync(); render(); }));
+    document.querySelectorAll('#fd-sweep-presets [data-sweep]').forEach((b) => b.addEventListener('click', () => { st.sweep = b.dataset.sweep; sync(); render(); }));
+    $('fd-example').addEventListener('click', () => {
+      Object.assign(st, { mac: '00:11:22:33:44:55', ip: '192.168.1.64', prefix: '/24' });
+      if (!st.iface[st.os].trim()) st.iface[st.os] = { windows: 'Ethernet', macos: 'en5', linux: 'eth0' }[st.os];
+      if (st.os === 'windows' && !st.idx.trim()) st.idx = '12';
+      sync();
+      render();
+      toast('Example values filled in. Replace them with what you find.');
+    });
+    $('fd-reset').addEventListener('click', () => {
+      Object.assign(st, { mac: '', ip: '', prefix: '', idx: '' });
+      sync();
       render();
     });
-    document.querySelectorAll('input[name="ws-os"]').forEach((r) => r.addEventListener('change', () => { st.os = r.value; sync(); render(); }));
     sync();
     render();
   }
@@ -1702,12 +1873,14 @@ Wireless LAN adapter Wi-Fi:
   const check = initCheck(() => tests.render());
   initScan(lookup, check);
   initOverhead();
-  initCapture();
+  initFind();
 
-  const VIEWS = ['lookup', 'scan', 'check', 'capture', 'subnets'];
+  const VIEWS = ['lookup', 'scan', 'check', 'find', 'subnets'];
   function route() {
     let v = location.hash.slice(1);
+    if (v === 'capture') v = 'find'; // the old Capture tab, from links
     if (!VIEWS.includes(v)) v = store.get('view', 'lookup');
+    if (v === 'capture') v = 'find'; // ...or from a saved view
     if (!VIEWS.includes(v)) v = 'lookup';
     VIEWS.forEach((name) => { $('view-' + name).hidden = name !== v; });
     document.querySelectorAll('.tab').forEach((a) => {

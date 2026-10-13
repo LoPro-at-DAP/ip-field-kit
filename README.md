@@ -1,17 +1,18 @@
 # IP Field Kit
 
-An installable web app (PWA) for IPv4 work in the field. It works offline once it has been opened one time.
+An installable web app (PWA) for networking students working in the field. It works offline once it has been opened one time.
 
 - **Lookup**: enter an IP and a mask (`/26`, `255.255.255.192`, or a wildcard like `0.0.0.63`) to get the network, usable range, broadcast, host position, address type (private, public, APIPA, CGNAT, loopback, multicast…), class, binary, hex, and reverse DNS name. You can also step through neighboring subnets.
 - **Scan**: take a photo of a screen, label, or printout (or paste command output) and the app pulls out every IPv4 address, labeled as IP, mask, gateway, DNS, and so on. It understands `ipconfig`, `ifconfig`, `ip addr`, `ip route`, and Cisco-style config. When it finds a full set of settings, one tap sends them to Check.
-- **Check**: enter a device's IP, mask, and gateway to catch common misconfigurations: a gateway outside the subnet, a network or broadcast address assigned to a device, or an APIPA address from a failed DHCP lease. Below that are Windows and Linux commands to run on the device, filled in with its addresses, with example output for passing and failing results:
+- **Check**: enter a device's IP, mask, and gateway to catch common misconfigurations: a gateway outside the subnet, a network or broadcast address assigned to a device, or an APIPA address from a failed DHCP lease. Below that are Windows, macOS, and Linux commands to run on the device, filled in with its addresses, with example output for passing and failing results:
   - **Reachability**: loopback, gateway, remote host, DNS.
-  - **MTU and fragmentation**: `ping -f -l 1472` (Windows) or `ping -M do -s 1472` (Linux), with a calculator (data size = MTU − 28) and presets for PPPoE, GRE, VXLAN, VPN, and jumbo frames.
+  - **MTU and fragmentation**: `ping -f -l 1472` (Windows), `ping -D -s 1472` (macOS), or `ping -M do -s 1472` (Linux), with a calculator (data size = MTU − 28) and presets for PPPoE, GRE, VXLAN, VPN, and jumbo frames.
   - **Routes**: `route print`, `Find-NetRoute`, `ip route get`, `tracert`, `traceroute`, `pathping`, `mtr`.
   - **ARP**: `arp -a`, `Get-NetNeighbor`, `ip neigh`, `arping`, including duplicate-IP detection.
+  - **See it in Wireshark**: display filters for packet size, fragmentation, MSS, and black holes (under MTU) and for ARP problems such as duplicates and wrong subnets (under ARP).
   - **Tunnel and label overhead**: stack MPLS labels, GRE or GRE with key (mGRE/DMVPN), IPsec (tunnel or transport, several ciphers), NAT-T, PPPoE, VXLAN, and WireGuard to get the IP MTU, ping size, MSS, and Cisco `ip mtu` / `ip tcp adjust-mss` / `mpls mtu` settings. Work backward from the largest MTU that passed to the likely cause, and run Cisco IOS checks such as `ping ... size ... df-bit` and `ping mpls ipv4 ... sweep`.
-- **Capture**: Wireshark display filters, filled in with your values, for measuring data size (DF pings, fragments, "fragmentation needed", MSS, black-hole retransmits, tunnel traffic), ARP (gratuitous, probes, duplicates, wrong subnet), and finding a device's address (ARP, DHCP, APIPA, IPv6 link-local, LLDP/CDP, mDNS). Includes capture filters, an offload warning, and step-by-step commands to give your laptop an address in the device's subnet and connect to it.
-- **Subnets**: the borrowing-bits solver, with worked math and the hosts and subnets lookup tables.
+- **Find a device**: a guided workflow for reaching equipment whose IP address you don't know, for Windows, macOS, and Linux laptops. Five steps, each with what to do, what you'll see, and a short explanation of why it works: get ready (cable, Wi-Fi off, MAC from the label); quick wins (default IP, DHCP, the maker's discovery tool); listen with Wireshark (annotated ARP, DHCP, link-local, LLDP/CDP, and mDNS examples); if it stays quiet (IPv6 all-nodes ping, sweeping common ranges, console port, factory reset); and connect (a suggested laptop address in the device's subnet, then commands to check it's free, set it, connect, and undo).
+- **Practice**: subnetting practice and planning. Enter a network and how many subnets or hosts you need, work it yourself, then check the borrowing-bits math and where the answer sits in the hosts and subnets lookup tables.
 
 ## Files
 
