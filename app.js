@@ -68,17 +68,29 @@
     return -1;
   }
 
-  // Accepts "/26", "26", "255.255.255.192", or a wildcard like "0.0.0.63".
+  // Accepts "/26", "26", "255.255.255.192", a macOS-style hex mask like "0xffffff00", or a wildcard like "0.0.0.63".
   function parseMask(str) {
     const s = String(str).trim();
     if (s === '') return { empty: true };
+    const hex = s.match(/^0x([0-9a-f]{8})$/i);
+    if (hex) {
+      const p = prefixOfMask(parseInt(hex[1], 16));
+      return p >= 0 ? { p, kind: 'mask' } : { error: `${s} isn't a valid mask. The 1 bits must run unbroken from the left.` };
+    }
     const m = s.match(/^\/?\s*(\d{1,2})$/);
     if (m) {
       const p = Number(m[1]);
       return p <= 32 ? { p, kind: 'prefix' } : { error: `/${p} isn't a valid prefix. Use a number from 0 to 32.` };
     }
     const n = parseIP(s);
-    if (n === null) return { error: 'Enter the mask as a prefix like /24 or in dotted decimal like 255.255.255.0.' };
+    if (n === null) {
+      // Pasted with a label, like "Subnet Mask . . . : 255.255.255.0" or "netmask 0xffffff00".
+      const inner = s.match(/(?:^|[^\d.])(\d{1,3}(?:\.\d{1,3}){3}|0x[0-9a-f]{8})(?![\d.])/i);
+      const slash = s.match(/\/\s*(\d{1,2})(?!\d)/);
+      const found = inner ? inner[1] : slash ? '/' + slash[1] : null;
+      if (found && found !== s) { const r = parseMask(found); if (!r.error) return r; }
+      return { error: 'Enter the mask as a prefix like /24 or in dotted decimal like 255.255.255.0.' };
+    }
     const p = prefixOfMask(n);
     if (p >= 0) return { p, kind: 'mask' };
     const w = prefixOfMask(MAX32 - 1 - n);
@@ -86,12 +98,18 @@
     return { error: `${s} isn't a valid mask. The 1 bits must run unbroken from the left, like 255.255.255.192.` };
   }
 
-  // Splits "10.1.2.3/24" or "10.1.2.3 255.255.255.0" typed into a single field.
-  function splitCombined(str) {
-    const m = String(str).trim().match(/^(\S+?)\s*(?:\/\s*(\d{1,2})|\s+(\S+))$/);
-    if (!m) return { ip: String(str).trim(), mask: null };
-    return { ip: m[1], mask: m[2] !== undefined ? '/' + m[2] : m[3] };
+  // Pull an IPv4 address, plus an optional /prefix or mask, out of what was typed or pasted:
+  // "192.168.1.5/24", "192.168.1.5 255.255.255.0", or "IPv4 Address. . . : 192.168.1.5(Preferred)".
+  function readAddress(str) {
+    const s = String(str).trim();
+    const m = s.match(/(^|[^\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])(?:\s*\/\s*(\d{1,2})|\s+(\d{1,3}(?:\.\d{1,3}){3}|0x[0-9a-f]{8})(?![\d.]))?/i);
+    if (!m) return { ip: s, mask: null, extra: false, v6: /[0-9a-f]*:[0-9a-f]*:/i.test(s) };
+    const used = m[0].slice(m[1].length);
+    return { ip: m[2], mask: m[3] !== undefined ? '/' + m[3] : (m[4] || null), extra: s !== used, v6: false };
   }
+  const hasLeadingZero = (ip) => /(^|\.)0\d/.test(ip);
+  const V6_MSG = "That's an IPv6 address. This app works with IPv4 addresses, like 192.168.1.10.";
+  const ZERO_MSG = 'Leading zeros are read as decimal here (010 = 10), but some systems read them as octal (010 = 8). Leave them out of device settings.';
 
   function commonPrefix(a, b) {
     let k = 0;
@@ -151,7 +169,8 @@
     const btn = e.target.closest('[data-copy]');
     if (!btn) return;
     const text = btn.dataset.copy;
-    const done = () => toast(`Copied ${text}`);
+    const hole = text.match(/<[^<>\s]+>/);
+    const done = () => toast(hole ? `Copied. Replace ${hole[0]} before you run it.` : `Copied ${text}`);
     const fail = () => toast("Couldn't copy. Select the text and copy it by hand.");
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(done, () => (legacyCopy(text) ? done() : fail()));
@@ -175,10 +194,10 @@
 
   // ---------- Lookup ----------
   function lookupCompute(ipText, maskText) {
-    const comb = splitCombined(ipText);
+    const comb = readAddress(ipText);
     const ip = parseIP(comb.ip);
     if (ip === null) {
-      return { error: comb.ip === '' ? 'Enter an IP address, like 192.168.1.130.' : `"${comb.ip}" isn't an IPv4 address. Use four numbers from 0 to 255 separated by dots.` };
+      return { error: comb.ip === '' ? 'Enter an IP address, like 192.168.1.130.' : comb.v6 ? V6_MSG : `"${comb.ip}" isn't an IPv4 address. Use four numbers from 0 to 255 separated by dots.` };
     }
     const cls = classOf(ip);
     const mk = parseMask(comb.mask !== null ? comb.mask : maskText);
@@ -191,6 +210,8 @@
       p = mk.p;
       if (mk.kind === 'wildcard') note = `That looks like a wildcard mask, so this uses its inverse, ${maskStr(p)} (/${p}).`;
     }
+    if (comb.extra) note = `Using ${ipStr(ip)} from the text you entered. ${note}`.trim();
+    if (hasLeadingZero(comb.ip)) note = `${note} ${ZERO_MSG}`.trim();
 
     const size = P2(32 - p);
     const net = netOf(ip, p);
@@ -379,8 +400,8 @@
     }
 
     function step(delta) {
-      const comb = splitCombined(ipEl.value);
-      if (comb.mask !== null) { ipEl.value = comb.ip; maskEl.value = comb.mask; }
+      const comb = readAddress(ipEl.value);
+      if (parseIP(comb.ip) !== null && (comb.mask !== null || comb.extra)) { ipEl.value = comb.ip; if (comb.mask !== null) maskEl.value = comb.mask; }
       const mk = parseMask(maskEl.value);
       const p = mk.p !== undefined ? mk.p : current ? current.p : 24;
       maskEl.value = '/' + Math.max(0, Math.min(32, p + delta));
@@ -390,8 +411,12 @@
     ipEl.addEventListener('input', run);
     maskEl.addEventListener('input', run);
     ipEl.addEventListener('change', () => {
-      const comb = splitCombined(ipEl.value);
-      if (comb.mask !== null && parseIP(comb.ip) !== null) { ipEl.value = comb.ip; maskEl.value = comb.mask; run(); }
+      const comb = readAddress(ipEl.value);
+      if (parseIP(comb.ip) !== null && (comb.mask !== null || comb.extra)) {
+        ipEl.value = comb.ip;
+        if (comb.mask !== null) maskEl.value = comb.mask;
+        run();
+      }
     });
     $('lk-dec').addEventListener('click', () => step(-1));
     $('lk-inc').addEventListener('click', () => step(1));
@@ -446,14 +471,20 @@
 
   // ---------- Device check ----------
   function checkCompute(ipT, maskT, gwT) {
+    const ipR = readAddress(ipT), gwR = readAddress(gwT);
     const ipIn = ipT.trim(), gwIn = gwT.trim();
-    const ip = parseIP(ipIn);
-    if (ip === null) return { error: ipIn ? `"${ipIn}" isn't an IPv4 address. Use four numbers from 0 to 255 separated by dots.` : 'Enter the device IP address.' };
-    const mk = parseMask(maskT);
+    const ip = parseIP(ipR.ip);
+    if (ip === null) return { error: !ipIn ? 'Enter the device IP address.' : ipR.v6 ? V6_MSG : `"${ipIn}" isn't an IPv4 address. Use four numbers from 0 to 255 separated by dots.` };
+    // A mask typed with the IP ("192.168.1.5/24") counts when the mask box is empty.
+    const maskIn = maskT.trim() !== '' ? maskT : (ipR.mask || '');
+    const mk = parseMask(maskIn);
     if (mk.empty) return { error: 'Enter the subnet mask, like 255.255.255.0 or /24.' };
-    if (mk.error) return { error: mk.error };
-    const gw = gwIn ? parseIP(gwIn) : null;
-    if (gwIn && gw === null) return { error: `"${gwIn}" isn't an IPv4 address. Check the gateway.` };
+    if (mk.error) {
+      if (prefixOfMask(ip) >= 8 && parseIP(maskIn) !== null) return { error: `The IP and mask look swapped: ${ipStr(ip)} is a subnet mask, and ${maskIn.trim()} is an address.` };
+      return { error: mk.error };
+    }
+    const gw = gwIn ? parseIP(gwR.ip) : null;
+    if (gwIn && gw === null) return { error: gwR.v6 ? 'The gateway is an IPv6 address. Enter the IPv4 gateway.' : `"${gwIn}" isn't an IPv4 address. Check the gateway.` };
 
     const p = mk.p, size = P2(32 - p), net = netOf(ip, p), bc = net + size - 1;
     const first = p >= 31 ? net : net + 1, last = p >= 31 ? bc : bc - 1;
@@ -461,8 +492,9 @@
     const items = [];
     const add = (s, html) => items.push({ s, html });
 
-    if (mk.kind === 'wildcard') add('warn', `${esc(maskT.trim())} is a wildcard mask, the inverse of a subnet mask. Devices need the subnet mask <b>${maskStr(p)}</b>.`);
+    if (mk.kind === 'wildcard') add('warn', `${esc(maskIn.trim())} is a wildcard mask, the inverse of a subnet mask. Devices need the subnet mask <b>${maskStr(p)}</b>.`);
     else add('ok', `Mask <b>${maskStr(p)}</b> is valid (/${p}).`);
+    if (hasLeadingZero(ipR.ip) || (gwIn && hasLeadingZero(gwR.ip))) add('warn', esc(ZERO_MSG));
 
     const sp = classify(ip);
     if (sp.kind === 'warn') add('bad', `<b>${ipStr(ip)}</b> is a link-local (APIPA) address, so the device didn't get an address from DHCP. Check the cable, the VLAN, and the DHCP server.`);
@@ -479,6 +511,12 @@
       add('info', 'Enter the default gateway to check it too.');
     } else if (gw === ip) {
       add('bad', "The gateway is the device's own address. It should be the router's address on this subnet.");
+    } else if (gw === 0) {
+      add('bad', '0.0.0.0 means "no gateway". Enter the router\'s address on this subnet.');
+    } else if (gw === MAX32 - 1) {
+      add('bad', "255.255.255.255 is the broadcast address for every network, so it can't be a gateway.");
+    } else if (classify(gw).dev === 'bad') {
+      add('bad', `Gateway <b>${ipStr(gw)}</b> is in a ${esc(classify(gw).label)} range and can't be a gateway.`);
     } else if (netOf(gw, p) !== net) {
       const cp = commonPrefix(ip, gw);
       add('bad', `Gateway <b>${ipStr(gw)}</b> is outside the device's subnet. The device is in ${ipStr(net)}/${p} (${range}), and the gateway falls in ${ipStr(netOf(gw, p))}/${p}. If the gateway is right, the mask would need to be /${cp} or shorter to include it.`);
@@ -555,8 +593,8 @@
   const ROLE_WORDS = [
     ['dhcp', /dhcp/gi],
     ['dns', /dns|name ?servers?/gi],
-    ['gateway', /gateway|default via|\bvia\b|\bgw\b|router|next.?hop/gi],
-    ['mask', /mask/gi],
+    ['gateway', /gateway|default via|\bdefault\b|\bvia\b|\bgw\b|router|next.?hop|puerta de enlace|passerelle/gi],
+    ['mask', /mask|m[aá]scara|masque/gi],
     ['broadcast', /broadcast|\bbrd\b|bcast/gi],
     ['ip', /ipv4|ip address|\binet\b|\baddr(ess)?\b|\bip\b|\bsrc\b/gi],
   ];
@@ -594,8 +632,11 @@
     const seen = new Set();
     let carry = null; // label of the line above, for values continued on the next line (ipconfig gateways, DNS servers)
     text.split(/\r?\n/).forEach((raw, lineNo) => {
-      const line = fixOcr(raw);
+      // macOS ifconfig shows masks in hex (netmask 0xffffff00): turn them into dotted form first.
+      const line = fixOcr(raw).replace(/\b0x([0-9a-f]{8})\b/gi, (hex, h) => (prefixOfMask(parseInt(h, 16)) >= 0 ? ipStr(parseInt(h, 16)) : hex));
       if (!line.trim()) { carry = null; return; }
+      // Windows route print: the default route row is "0.0.0.0  0.0.0.0  <gateway>  <interface IP>  <metric>".
+      const routeRow = /^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+\d/.test(line);
       IP_IN_TEXT.lastIndex = 0;
       let m, prevEnd = 0, inherited = false;
       const hits = [];
@@ -607,6 +648,12 @@
         const prefix = m[6] !== undefined ? Number(m[6]) : null;
         if (octs.some((o) => o > 255) || (prefix !== null && prefix > 32)) continue;
         const n = ((octs[0] * 256 + octs[1]) * 256 + octs[2]) * 256 + octs[3];
+        if (/(version|firmware|\bfw\b|build|release|\bver\b|\bv)[\s:.]*$/i.test(before)) continue; // "Firmware 1.2.3.4" is not an address
+        if (routeRow) {
+          if (n === 0) continue;
+          hits.push({ n, prefix, role: hits.length ? 'ip' : 'gateway', lineNo, line: raw });
+          continue;
+        }
         let role = closestRole(before);
         if (!role) {
           const onlyThis = line.replace(m[0].slice(m[1].length), '').replace(/[\s:.,()[\]|-]/g, '') === '';
@@ -628,16 +675,24 @@
     return items;
   }
 
+  // Group each IP with the mask and gateway that follow it (one group per adapter), then pick the adapter
+  // that has a gateway. That skips virtual adapters (Hyper-V, VirtualBox, Docker) that Windows often lists first.
   function settingsFrom(items) {
-    const ipIdx = items.findIndex((i) => i.role === 'ip' && Math.floor(i.n / 16777216) !== 127 && prefixOfMask(i.n) < 8);
-    if (ipIdx < 0) return null;
-    const ipItem = items[ipIdx];
-    const after = items.slice(ipIdx + 1);
-    let mask = ipItem.prefix !== null ? '/' + ipItem.prefix : null;
-    if (!mask) { const mi = after.find((i) => i.role === 'mask'); if (mi) mask = ipStr(mi.n); }
-    if (!mask) return null;
-    const gw = after.find((i) => i.role === 'gateway') || items.find((i) => i.role === 'gateway');
-    return { ip: ipStr(ipItem.n), mask, gw: gw ? ipStr(gw.n) : '' };
+    const groups = [];
+    let g = null;
+    for (const it of items) {
+      if (it.role === 'ip' && Math.floor(it.n / 16777216) !== 127 && prefixOfMask(it.n) < 8) {
+        g = { n: it.n, mask: it.prefix, cidr: it.prefix !== null, gw: null };
+        groups.push(g);
+      } else if (g && it.role === 'mask' && g.mask === null && prefixOfMask(it.n) >= 0) g.mask = prefixOfMask(it.n);
+      else if (g && it.role === 'gateway' && g.gw === null) g.gw = it.n;
+    }
+    const best = groups.find((x) => x.mask !== null && x.gw !== null) || groups.find((x) => x.mask !== null);
+    if (!best) return null;
+    // No gateway after the IP (for example, ip route pasted before ip addr): use one in the same subnet.
+    let gw = best.gw;
+    if (gw === null) { const same = items.find((i) => i.role === 'gateway' && netOf(i.n, best.mask) === netOf(best.n, best.mask)); if (same) gw = same.n; }
+    return { ip: ipStr(best.n), mask: best.cidr ? '/' + best.mask : maskStr(best.mask), gw: gw !== null ? ipStr(gw) : '' };
   }
 
   const SCAN_EXAMPLE = `Windows IP Configuration
@@ -802,7 +857,8 @@ Wireless LAN adapter Wi-Fi:
     }
 
     async function scanFile(file) {
-      if (!file || busy) return;
+      if (!file) return;
+      if (busy) { toast('Still reading the last photo. Try again in a moment.'); return; }
       busy = true;
       $('sc-error').hidden = true;
       if (previewUrl) URL.revokeObjectURL(previewUrl);
@@ -1113,8 +1169,12 @@ Wireless LAN adapter Wi-Fi:
       $('ts-ws-size').innerHTML = WS_SIZE.map(([cmd, what]) => cmdHTML({ cmd, what }, v)).join('');
       $('ts-offload').innerHTML = cmdHTML(OFFLOAD[st.os], v);
       $('ts-ws-arp').innerHTML = WS_ARP.map(([cmd, what]) => cmdHTML({ cmd, what }, v)).join('');
+      const big = !v.okMtu ? ''
+        : st.os === 'windows' && Number(v.payload) > 65500 ? ' Windows ping sends at most 65,500 bytes of data, so it can\'t test an MTU above 65,528.'
+        : st.os === 'macos' && Number(v.payload) > 8184 ? ' On macOS, data sizes this large may need sudo.'
+        : '';
       $('ts-mtu-calc').innerHTML = v.okMtu
-        ? `${v.mtu} MTU − 20 IP header − 8 ICMP header = <b>${v.payload}</b> bytes of ping data`
+        ? `${v.mtu} MTU − 20 IP header − 8 ICMP header = <b>${v.payload}</b> bytes of ping data.${big}`
         : 'Enter an MTU from 68 to 65535.';
       document.querySelectorAll('#ts-mtu-presets [data-mtu]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.mtu === st.mtu.trim())));
       store.set('tests', st);
@@ -1254,6 +1314,7 @@ Wireless LAN adapter Wi-Fi:
           const hits = OVERHEAD_CAUSES.filter(([lo, hi]) => gap >= lo && gap <= hi);
           why = `<p class="calc">${base} − ${passed} = <b>${gap}</b> bytes missing</p>`;
           if (gap > 0) why += `<p class="cap">First check the device's own interface MTU (netsh interface ipv4 show subinterfaces, or ip link show). If it's already ${passed}, the limit is on the device, not the path.</p>`;
+          if (gap === 28) why += `<p class="note">Is ${passed} the ping data size that worked? Then add 28 for the headers: the MTU is ${base} and nothing is missing.</p>`;
           if (gap === 0) why += '<p class="cap">Nothing is missing. The full MTU gets through.</p>';
           else if (hits.length) why += `<ul class="matches">${hits.map(([lo, hi, cause]) => `<li><b>${lo === hi ? lo : `${lo}–${hi}`}</b><span>${esc(cause)}</span></li>`).join('')}</ul>`;
           else why += '<p class="cap">No single common encapsulation matches. Several layers may be stacked: try combinations in the calculator above.</p>';
@@ -1433,10 +1494,11 @@ Wireless LAN adapter Wi-Fi:
 
     function values() {
       const errs = [];
-      const ipText = st.ip.trim();
-      const ipN = parseIP(ipText);
-      if (ipText && ipN === null) errs.push(`"${ipText}" isn't a complete IPv4 address.`);
-      const mk = parseMask(st.prefix);
+      const ipR = readAddress(st.ip);
+      const ipN = parseIP(ipR.ip);
+      if (st.ip.trim() && ipN === null) errs.push(ipR.v6 ? "That's an IPv6 address. Enter the device's IPv4 address here, or use the IPv6 steps in step 4." : `"${st.ip.trim()}" isn't a complete IPv4 address.`);
+      // A prefix typed with the IP ("192.168.1.64/24") counts when the Prefix box is empty.
+      const mk = parseMask(st.prefix.trim() !== '' ? st.prefix : (ipR.mask || ''));
       let p = null, guessed = false;
       if (mk.p !== undefined) p = mk.p;
       else if (mk.empty) { if (ipN !== null) { p = 24; guessed = true; } }
@@ -1450,9 +1512,20 @@ Wireless LAN adapter Wi-Fi:
       const net3 = sw && [sw[1], sw[2], sw[3]].every((o) => Number(o) <= 255) ? `${Number(sw[1])}.${Number(sw[2])}.${Number(sw[3])}` : null;
       if (!net3) errs.push('Enter the range to sweep as the first three numbers of an address, like 192.168.1.0.');
       const iface = st.iface[st.os].trim();
-      const laptop = ipN !== null && p !== null ? laptopAddress(ipN, apipa ? 24 : p) : null;
+      const idx = st.idx.trim();
+      if (st.os === 'windows' && idx && !/^\d+$/.test(idx)) errs.push('The interface index is a number from the Idx column, like 12.');
+      // Link-local reserves 169.254.0.x and 169.254.255.x, so never suggest a laptop address there.
+      const apipaNear = (n) => ([0, 255].includes(octets(n)[2]) ? parseIP('169.254.1.1') : n);
+      const laptop = ipN !== null && p !== null ? (apipa ? laptopAddress(apipaNear(ipN), 24) : laptopAddress(ipN, p)) : null;
+      let devWarn = '';
+      if (ipN !== null) {
+        const sp = classify(ipN);
+        const net = p !== null ? netOf(ipN, p) : null;
+        if (sp.dev === 'bad') devWarn = `${ipStr(ipN)} is a ${sp.label} address, not a device address. Check what you found.`;
+        else if (p !== null && p <= 30 && !apipa && (ipN === net || ipN === net + P2(32 - p) - 1)) devWarn = `${ipStr(ipN)} is the ${ipN === net ? 'network' : 'broadcast'} address of a /${p}, so it can't be the device. Check the address or the prefix.`;
+      }
       return {
-        errs, ipN, p, guessed, apipa, laptopN: laptop, macOk: !!mac, ifaceOk: !!iface,
+        errs, ipN, p, guessed, apipa, devWarn, laptopN: laptop, macOk: !!mac, ifaceOk: !!iface,
         ip: ipN !== null ? ipStr(ipN) : '<device-ip>',
         prefix: p !== null ? String(p) : '<prefix>',
         mask: p !== null ? maskStr(p) : '<mask>',
@@ -1460,7 +1533,7 @@ Wireless LAN adapter Wi-Fi:
         mac: mac || '<mac>',
         ll: mac ? eui64(mac) : '<fe80-address>',
         iface: iface || '<interface>',
-        idx: st.idx.trim() || '<index>',
+        idx: /^\d+$/.test(idx) ? idx : '<index>',
         net3: net3 || '<a.b.c>',
       };
     }
@@ -1485,7 +1558,8 @@ Wireless LAN adapter Wi-Fi:
       $('fd-console').innerHTML = [...F.console, CONSOLE_TAIL].map((t) => item(t, v)).join('');
 
       const sug = $('fd-suggest');
-      if (v.ipN === null) sug.textContent = "Enter the device's IP in any \"Found it?\" box first. The commands below fill in from it.";
+      if (v.devWarn) sug.innerHTML = `<b>Check this:</b> ${esc(v.devWarn)}`;
+      else if (v.ipN === null) sug.textContent = "Enter the device's IP in any \"Found it?\" box first. The commands below fill in from it.";
       else if (v.apipa) sug.innerHTML = `${esc(v.ip)} is a link-local (APIPA) address. Your laptop can join it at <b>${esc(v.laptop)}/16</b>, or see the first shortcut below.`;
       else if (v.laptopN === null) sug.textContent = `A /${v.p} has no room for a second address. Check the prefix.`;
       else sug.innerHTML = `Use <b>${esc(v.laptop)}/${v.p}</b> (mask ${esc(v.mask)}) for your laptop. It's in the same subnet as ${esc(v.ip)}${v.guessed ? ', assuming a /24' : ''}.`;
@@ -1573,6 +1647,7 @@ Wireless LAN adapter Wi-Fi:
     function compute() {
       const base = state.prefix;
       const ip = parseIP(state.ip);
+      if (ip === null && /\/\s*\d/.test(state.ip)) return { base, error: `Choose the prefix from the Prefix menu, from /${MIN_P} to /${MAX_P}, and enter just the network address here.` };
       if (ip === null) return { base, error: 'Enter the network as four numbers from 0 to 255 separated by dots, like 172.16.0.0.' };
       const net = netOf(ip, base);
       const r = { base, ip, net, adjusted: net !== ip, mode: state.mode };
