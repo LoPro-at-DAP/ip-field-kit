@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>IP Field Kit</title>
+<meta name="description" content="Look up IPv4 address details, check a device's IP settings, and solve subnetting problems. Works offline.">
+<meta name="theme-color" content="#eef1f4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e141a" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="IP Kit">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,600;1,400&display=swap">
+<style>
+/* Layout: app bar on top, one scrolling column per tool, tab bar fixed to the bottom.
+   Bits are colored like the wire: blue = network bits, orange = borrowed bits, green = host bits. */
+:root {
+  --bg: #eef1f4;
+  --surface: #ffffff;
+  --ink: #15202b;
+  --muted: #5b6877;
+  --faint: #9aa6b2;
+  --line: #d5dce3;
+  --hl: #f0f3f7;
+  --net: #2a5ca8;
+  --net-tint: #e3ebf7;
+  --borrow: #b0560b;
+  --borrow-tint: #fdf0e3;
+  --host: #2a7046;
+  --host-tint: #e6f3ea;
+  --warn: #a8321f;
+  --warn-tint: #fbe5e0;
+  --shadow: 0 1px 2px rgba(21, 32, 43, 0.08);
+  --lift: 0 6px 20px rgba(21, 32, 43, 0.18);
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e141a;
+    --surface: #161f28;
+    --ink: #e4eaf0;
+    --muted: #97a5b3;
+    --faint: #5b6877;
+    --line: #2a3744;
+    --hl: #1c2732;
+    --net: #8db3f2;
+    --net-tint: #1a2940;
+    --borrow: #f39a4d;
+    --borrow-tint: #3a2513;
+    --host: #74c996;
+    --host-tint: #142d1e;
+    --warn: #f2907c;
+    --warn-tint: #3a1c16;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --lift: 0 6px 20px rgba(0, 0, 0, 0.5);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e141a;
+  --surface: #161f28;
+  --ink: #e4eaf0;
+  --muted: #97a5b3;
+  --faint: #5b6877;
+  --line: #2a3744;
+  --hl: #1c2732;
+  --net: #8db3f2;
+  --net-tint: #1a2940;
+  --borrow: #f39a4d;
+  --borrow-tint: #3a2513;
+  --host: #74c996;
+  --host-tint: #142d1e;
+  --warn: #f2907c;
+  --warn-tint: #3a1c16;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --lift: 0 6px 20px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 400 16px/1.5 var(--font-body); }
+sup { font-size: 0.68em; line-height: 0; }
+var { font-style: italic; font-family: var(--font-body); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.muted { color: var(--muted); }
+
+/* App bar */
+.appbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  padding-top: calc(10px + env(safe-area-inset-top, 0px));
+  padding-bottom: 10px;
+  padding-inline: max(16px, env(safe-area-inset-left, 0px)) max(16px, env(safe-area-inset-right, 0px));
+}
+.appbar-in { max-width: 760px; margin-inline: auto; display: flex; align-items: center; gap: 10px; }
+.brand { display: flex; align-items: center; gap: 9px; margin-right: auto; font: 700 1.2rem/1 var(--font-display); letter-spacing: 0.01em; }
+.brand img { width: 26px; height: 26px; border-radius: 6px; }
+.status { font: 600 11px/1 var(--font-body); text-transform: uppercase; letter-spacing: 0.07em; padding: 6px 9px; border-radius: 999px; background: var(--borrow-tint); color: var(--borrow); }
+
+/* Page column */
+.wrap {
+  max-width: 760px;
+  margin-inline: auto;
+  padding-inline: max(16px, env(safe-area-inset-left, 0px)) max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 20px calc(104px + env(safe-area-inset-bottom, 0px));
+}
+.view { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+.vhead { display: grid; gap: 4px; }
+.vhead h1 { margin: 0; font: 700 clamp(1.75rem, 7vw, 2.2rem)/1.05 var(--font-display); letter-spacing: -0.01em; text-wrap: balance; }
+.lede { margin: 0; color: var(--muted); max-width: 60ch; }
+section { display: grid; gap: 12px; min-width: 0; }
+.sec { margin: 0; font: 700 1.25rem/1.2 var(--font-display); text-wrap: balance; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px; box-shadow: var(--shadow); }
+.cap { margin: 0; font-size: 13.5px; color: var(--muted); max-width: 64ch; }
+.stack { display: grid; gap: 12px; }
+
+.hint { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--net-tint); font-size: 14px; }
+.hint span { flex: 1; }
+.hint button { all: unset; cursor: pointer; padding: 4px 6px; color: var(--muted); font-size: 16px; }
+
+/* Inputs */
+.controls { gap: 14px; }
+.row { display: flex; gap: 10px; align-items: end; }
+.field { display: grid; gap: 6px; min-width: 0; }
+.field.grow { flex: 1; }
+.field.pfx { flex: none; width: 6.5rem; }
+.field label { font-size: 13px; font-weight: 600; color: var(--muted); }
+input[type="text"], input[type="number"], select {
+  width: 100%;
+  min-width: 0;
+  font: 500 17px/1.25 var(--font-mono);
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 11px 12px;
+}
+select { padding-right: 6px; }
+input::placeholder { color: var(--faint); }
+input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
+
+.stepper { display: grid; grid-template-columns: 48px minmax(0, 1fr) 48px; gap: 6px; }
+.stepper button {
+  font: 500 22px/1 var(--font-mono);
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.presets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.presets > span { font-size: 13px; color: var(--muted); padding-right: 2px; }
+.chip {
+  font: 500 13px/1 var(--font-mono);
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 8px 11px;
+  cursor: pointer;
+}
+.chip.text { font-family: var(--font-body); font-weight: 600; }
+.chip:hover { border-color: var(--muted); }
+
+.btn {
+  justify-self: start;
+  font: 600 14px/1.2 var(--font-body);
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+.btn:hover { border-color: var(--muted); }
+.btn:disabled { opacity: 0.55; cursor: default; }
+.btn.small { padding: 7px 11px; font-size: 13px; }
+.btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.btnrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+.seg {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  padding: 3px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.seg input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
+.seg label { display: block; text-align: center; padding: 10px 6px; border-radius: 7px; font-weight: 600; font-size: 15px; color: var(--muted); cursor: pointer; }
+.seg input:checked + label { background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
+.seg input:focus-visible + label { outline: 2px solid var(--net); outline-offset: 1px; }
+
+.note { margin: 0; font-size: 14px; background: var(--net-tint); border-radius: 8px; padding: 10px 12px; }
+.note b { font-family: var(--font-mono); }
+.error { margin: 0; color: var(--warn); background: var(--warn-tint); border-radius: 10px; padding: 12px 14px; font-weight: 500; }
+
+/* Lookup summary */
+.summary { display: grid; gap: 10px; }
+.addr { margin: 0; font: 600 clamp(1.5rem, 7vw, 2rem)/1.1 var(--font-mono); overflow-wrap: anywhere; }
+.addr .pfx, .kv .pfx { color: var(--muted); font-weight: 500; }
+.role { margin: 0; font-weight: 600; }
+.role.ok { color: var(--host); }
+.role.bad { color: var(--warn); }
+.role.info { color: var(--ink); }
+.badges { display: flex; flex-wrap: wrap; gap: 6px; }
+.badge { display: inline-flex; align-items: center; gap: 6px; font: 600 12.5px/1.2 var(--font-body); padding: 6px 10px; border-radius: 999px; background: var(--hl); color: var(--muted); }
+.badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none; }
+.badge.private { background: var(--net-tint); color: var(--net); }
+.badge.public { background: var(--host-tint); color: var(--host); }
+.badge.special { background: var(--borrow-tint); color: var(--borrow); }
+.badge.warn { background: var(--warn-tint); color: var(--warn); }
+
+/* Key/value lists */
+.kv { margin: 0; display: grid; }
+.kv-row { display: grid; grid-template-columns: minmax(6.5rem, 38%) minmax(0, 1fr); gap: 12px; align-items: baseline; padding: 10px 0; border-top: 1px solid var(--line); }
+.kv-row:first-child { border-top: 0; padding-top: 0; }
+.kv-row:last-child { padding-bottom: 0; }
+.kv dt { font-size: 13.5px; color: var(--muted); }
+.kv dd { margin: 0; font: 500 15px/1.4 var(--font-mono); font-variant-numeric: tabular-nums; min-width: 0; overflow-wrap: anywhere; }
+.kv dd b { color: var(--borrow); font-weight: 600; }
+.copy { all: unset; cursor: pointer; border-radius: 4px; }
+.copy svg { width: 13px; height: 13px; margin-left: 7px; vertical-align: -1px; color: var(--faint); }
+.copy:hover svg { color: var(--muted); }
+.copy:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
+
+.nbrs { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.nbr { display: grid; gap: 2px; text-align: left; justify-self: stretch; min-width: 0; }
+.nbr.next { text-align: right; }
+.nbr small { font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.nbr span { font: 500 14px/1.3 var(--font-mono); overflow-wrap: anywhere; }
+
+details.panel > summary { cursor: pointer; font-weight: 600; list-style-position: outside; }
+details.panel[open] > summary { margin-bottom: 12px; }
+
+/* Device check */
+.verdict { display: inline-flex; justify-self: start; align-items: center; gap: 8px; font: 700 1rem/1.2 var(--font-body); padding: 8px 14px; border-radius: 999px; }
+.verdict.ok { background: var(--host-tint); color: var(--host); }
+.verdict.warn { background: var(--borrow-tint); color: var(--borrow); }
+.verdict.bad { background: var(--warn-tint); color: var(--warn); }
+.checklist { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+.checklist li { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; align-items: start; }
+.checklist p { margin: 0; padding-top: 2px; }
+.checklist b { font-family: var(--font-mono); font-weight: 600; }
+.mark { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font: 700 14px/1 var(--font-body); }
+.mark.ok { background: var(--host-tint); color: var(--host); }
+.mark.bad { background: var(--warn-tint); color: var(--warn); }
+.mark.warn { background: var(--borrow-tint); color: var(--borrow); }
+.mark.info { background: var(--hl); color: var(--muted); }
+
+/* Bits */
+.bit { text-align: center; border-radius: 3px; font-family: var(--font-mono); font-weight: 600; }
+.bit.net { background: var(--net-tint); color: var(--net); }
+.bit.brw { background: var(--borrow-tint); color: var(--borrow); }
+.bit.hst { background: var(--host-tint); color: var(--host); }
+.bits { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 10px; }
+@media (min-width: 560px) { .bits { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.octet { display: grid; gap: 3px; min-width: 0; }
+.obits { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 2px; }
+.obits .bit { font-size: 15px; line-height: 1; padding: 7px 0; }
+.obits.mask .bit { background: transparent; box-shadow: inset 0 0 0 1px var(--line); font-weight: 500; }
+.odec { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: var(--muted); }
+.odec b { font: 600 13px var(--font-mono); color: var(--ink); }
+.odec span { font-family: var(--font-mono); }
+.legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--muted); }
+.legend li { display: flex; align-items: center; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+.sw.net { background: var(--net); }
+.sw.brw { background: var(--borrow); }
+.sw.hst { background: var(--host); }
+
+/* Solver */
+.answer-line { margin: 0; font-size: 17px; max-width: 62ch; }
+.answer-line b { font-family: var(--font-mono); font-weight: 600; }
+.stats {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-flow: row dense;
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.stat { background: var(--surface); padding: 12px 14px; display: grid; align-content: start; gap: 2px; min-width: 0; }
+.stat.wide { grid-column: span 2; }
+.stat dt { font-size: 11.5px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+.stat dd { margin: 0; font: 600 clamp(1.1rem, 4.6vw, 1.45rem)/1.2 var(--font-mono); font-variant-numeric: tabular-nums; }
+.stat dd.sub { font: 400 12.5px/1.3 var(--font-body); color: var(--muted); }
+.stat.key dd:first-of-type { color: var(--borrow); }
+@media (min-width: 620px) { .stats { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+
+.steps { list-style: none; margin: 0; padding: 0; counter-reset: step; display: grid; gap: 24px; }
+.steps > li { counter-increment: step; display: grid; grid-template-columns: 30px minmax(0, 1fr); column-gap: 12px; row-gap: 8px; }
+.steps > li::before {
+  content: counter(step);
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  align-self: start;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ink);
+  display: grid;
+  place-items: center;
+  font: 600 13px/1 var(--font-mono);
+}
+.steps h3 { grid-column: 2; margin: 0; font: 600 1.05rem/30px var(--font-body); }
+.step-body { grid-column: 2; display: grid; gap: 10px; min-width: 0; }
+.step-body p { margin: 0; max-width: 62ch; }
+.calc { font: 500 16px/1.45 var(--font-mono); }
+.calc b { color: var(--borrow); font-weight: 600; }
+.aside { font: 400 13px var(--font-body); color: var(--muted); padding-left: 8px; }
+.ladder { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.rung { display: grid; gap: 3px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); font: 500 14px/1.2 var(--font-mono); }
+.rung .tag { font: 600 10.5px/1.2 var(--font-body); text-transform: uppercase; letter-spacing: 0.07em; color: var(--muted); }
+.rung.low .eq { color: var(--muted); }
+.rung.ok { border-color: var(--borrow); background: var(--borrow-tint); }
+.rung.ok .tag { color: var(--borrow); }
+.rung.skip { align-self: center; border: 0; background: none; color: var(--muted); padding-inline: 2px; }
+.obreak { border-collapse: separate; border-spacing: 3px; margin-left: -3px; }
+.obreak th { font: 500 12px/1.2 var(--font-mono); color: var(--muted); padding: 2px 0; width: 2.4rem; text-align: center; }
+.obreak td { font-size: 15px; padding: 7px 0; }
+.obreak td.last { box-shadow: inset 0 0 0 2px var(--ink); }
+.sum { font: 500 15px/1.4 var(--font-mono); }
+.sum b { color: var(--borrow); }
+
+/* Tables */
+.tstack { display: flex; flex-direction: column; gap: 16px; }
+.tstack[data-mode="subnets"] .t-sub { order: -1; }
+.tcard { display: grid; gap: 8px; padding: 14px 0 4px; min-width: 0; }
+.tcard h3, .tcard .cap { padding-inline: 14px; }
+.tcard h3 { margin: 0; font: 600 1rem/1.3 var(--font-body); }
+.scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.ref { border-collapse: collapse; width: 100%; font: 400 13px/1.3 var(--font-mono); font-variant-numeric: tabular-nums; }
+.ref th, .ref td { padding: 8px 7px; text-align: center; white-space: nowrap; border-top: 1px solid var(--line); }
+.ref thead th { font: 600 11px/1.25 var(--font-body); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); white-space: normal; border-top: 0; vertical-align: bottom; }
+.ref tbody th { position: sticky; left: 0; z-index: 1; background: var(--surface); text-align: left; font: 600 13px/1.3 var(--font-body); }
+.ref tr > :first-child { padding-left: 14px; }
+.ref tr > :last-child { padding-right: 14px; }
+.ref tr.split > * { border-top: 2px solid var(--line); }
+.ref td.col-hi { background: var(--hl); }
+.ref td.cell-hi { background: var(--borrow-tint); color: var(--borrow); font-weight: 600; box-shadow: inset 0 0 0 1.5px var(--borrow); }
+.ref td.off { color: var(--faint); }
+.ref tr.row-hi td { background: var(--borrow-tint); color: var(--borrow); font-weight: 600; }
+.tbl-host tbody tr:first-child > * { border-top: 0; }
+.ranges .ref td { text-align: left; }
+.ranges .ref td:last-child { white-space: normal; font-family: var(--font-body); min-width: 12rem; }
+.ranges .ref tr > :first-child { padding-left: 0; }
+.ranges .ref tr > :last-child { padding-right: 0; }
+
+.sublist { display: grid; font: 400 13.5px/1.35 var(--font-mono); font-variant-numeric: tabular-nums; }
+.srow { display: grid; grid-template-columns: 2.25rem minmax(0, 1fr) auto; column-gap: 10px; row-gap: 2px; padding: 8px 0; border-top: 1px solid var(--line); }
+.srow .idx { grid-column: 1; grid-row: 1 / span 2; color: var(--muted); }
+.srow .net { grid-column: 2; grid-row: 1; overflow-wrap: anywhere; }
+.srow .bc { grid-column: 3; grid-row: 1; text-align: right; }
+.srow .rng { grid-column: 2 / 4; grid-row: 2; color: var(--muted); }
+.srow .net b { color: var(--borrow); font-weight: 600; }
+.srow .pfx { color: var(--muted); }
+.srow.hdr { border-top: 0; padding-top: 0; font: 600 11px/1.3 var(--font-body); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.srow.hdr > * { color: var(--muted); }
+.sgap { padding: 6px 0; border-top: 1px dashed var(--line); text-align: center; font-size: 12.5px; color: var(--muted); }
+@media (min-width: 640px) {
+  .srow { grid-template-columns: 2.25rem minmax(0, 1.1fr) minmax(0, 1.8fr) minmax(0, 1fr); }
+  .srow .idx { grid-row: 1; }
+  .srow .rng { grid-column: 3; grid-row: 1; }
+  .srow .bc { grid-column: 4; text-align: left; }
+}
+.notes { list-style: none; margin: 0; padding: 16px 0 0; display: grid; gap: 8px; font-size: 13.5px; color: var(--muted); max-width: 66ch; border-top: 1px solid var(--line); }
+
+/* Tab bar */
+.tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  padding-inline: env(safe-area-inset-left, 0px) env(safe-area-inset-right, 0px);
+}
+.tabs { max-width: 760px; margin-inline: auto; display: grid; grid-template-columns: repeat(3, 1fr); }
+.tab { display: grid; justify-items: center; gap: 3px; padding: 9px 4px 10px; color: var(--muted); text-decoration: none; font: 600 12px/1.1 var(--font-body); }
+.tab svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.tab[aria-current="page"] { color: var(--borrow); }
+
+.toast {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(80px + env(safe-area-inset-bottom, 0px));
+  z-index: 20;
+  width: max-content;
+  max-width: calc(100% - 32px);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 16px;
+  border-radius: 10px;
+  background: var(--ink);
+  color: var(--bg);
+  font-size: 14px;
+  box-shadow: var(--lift);
+}
+.toast button { all: unset; cursor: pointer; font-weight: 700; text-decoration: underline; color: var(--bg); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; scroll-behavior: auto !important; }
+}
+</style>
+</head>
+<body>
+<header class="appbar">
+  <div class="appbar-in">
+    <div class="brand"><img src="icons/icon-192.png" alt="">IP Field Kit</div>
+    <span id="net-status" class="status" hidden>Offline</span>
+    <button id="install" class="btn small primary" type="button" hidden>Install</button>
+  </div>
+</header>
+
+<main class="wrap">
+  <p id="ios-hint" class="hint" hidden><span>To install, tap <b>Share</b>, then <b>Add to Home Screen</b>.</span><button id="ios-hint-x" type="button" aria-label="Dismiss">✕</button></p>
+
+  <!-- ================= Lookup ================= -->
+  <div id="view-lookup" class="view">
+    <header class="vhead">
+      <h1>Address lookup</h1>
+      <p class="lede">Enter an IP and mask to see its subnet, usable range, and what kind of address it is.</p>
+    </header>
+
+    <section class="panel controls" aria-label="Address to look up">
+      <div class="field">
+        <label for="lk-ip">IP address</label>
+        <input id="lk-ip" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="192.168.1.130">
+      </div>
+      <div class="field">
+        <label for="lk-mask">Mask or prefix</label>
+        <div class="stepper">
+          <button type="button" id="lk-dec" aria-label="Shorter prefix">−</button>
+          <input id="lk-mask" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="/26 or 255.255.255.192">
+          <button type="button" id="lk-inc" aria-label="Longer prefix">+</button>
+        </div>
+      </div>
+      <div class="presets" id="lk-examples">
+        <span>Examples</span>
+        <button type="button" class="chip" data-ip="192.168.1.130" data-mask="/26">192.168.1.130/26</button>
+        <button type="button" class="chip" data-ip="172.20.14.9" data-mask="255.255.240.0">172.20.14.9 /20</button>
+        <button type="button" class="chip" data-ip="169.254.33.7" data-mask="">169.254.33.7</button>
+        <button type="button" class="chip" data-ip="8.8.8.8" data-mask="">8.8.8.8</button>
+      </div>
+      <div class="btnrow">
+        <button type="button" id="lk-myip" class="btn" data-online>Use my public IP</button>
+      </div>
+      <p id="lk-note" class="note" hidden></p>
+    </section>
+
+    <p id="lk-error" class="error" role="alert" hidden></p>
+
+    <div id="lk-out" class="view">
+      <section class="panel summary" aria-live="polite">
+        <p class="addr" id="lk-addr"></p>
+        <p class="role" id="lk-role"></p>
+        <div class="badges" id="lk-badges"></div>
+        <p class="cap" id="lk-type-note"></p>
+      </section>
+
+      <section>
+        <h2 class="sec">Subnet</h2>
+        <dl class="kv panel" id="lk-subnet"></dl>
+        <div class="nbrs">
+          <button type="button" class="btn nbr" id="lk-prev"><small>← Previous</small><span></span></button>
+          <button type="button" class="btn nbr next" id="lk-next"><small>Next →</small><span></span></button>
+        </div>
+        <button type="button" class="btn" id="lk-split">Split this subnet in the solver</button>
+      </section>
+
+      <section>
+        <h2 class="sec">Binary</h2>
+        <div id="lk-bits" class="panel stack"></div>
+      </section>
+
+      <section>
+        <h2 class="sec">Other formats</h2>
+        <dl class="kv panel" id="lk-formats"></dl>
+      </section>
+
+      <section>
+        <h2 class="sec">Owner</h2>
+        <div class="panel stack">
+          <p class="cap" id="lk-owner-cap"></p>
+          <button type="button" class="btn" id="lk-owner-btn" data-online>Look up owner</button>
+          <div id="lk-owner-out" hidden></div>
+        </div>
+      </section>
+    </div>
+
+    <details class="panel ranges">
+      <summary>Special address ranges</summary>
+      <div class="scroll"><table class="ref" id="lk-ranges"></table></div>
+    </details>
+  </div>
+
+  <!-- ================= Device check ================= -->
+  <div id="view-check" class="view" hidden>
+    <header class="vhead">
+      <h1>Device check</h1>
+      <p class="lede">Enter a device's IP settings to catch a wrong mask, a gateway outside the subnet, or a failed DHCP lease.</p>
+    </header>
+
+    <section class="panel controls" aria-label="Device settings">
+      <div class="field">
+        <label for="ck-ip">Device IP address</label>
+        <input id="ck-ip" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="10.20.30.40">
+      </div>
+      <div class="field">
+        <label for="ck-mask">Subnet mask</label>
+        <input id="ck-mask" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="255.255.255.0 or /24">
+      </div>
+      <div class="field">
+        <label for="ck-gw">Default gateway</label>
+        <input id="ck-gw" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="10.20.30.1">
+      </div>
+      <div class="presets">
+        <span>Examples</span>
+        <button type="button" class="chip text" data-check="10.20.30.40|255.255.255.0|10.20.30.1">Good settings</button>
+        <button type="button" class="chip text" data-check="192.168.1.50|255.255.255.192|192.168.1.65">Gateway outside</button>
+        <button type="button" class="chip text" data-check="172.16.4.0|255.255.252.0|172.16.4.1">Network address</button>
+        <button type="button" class="chip text" data-check="169.254.33.7|255.255.0.0|">No DHCP</button>
+      </div>
+    </section>
+
+    <p id="ck-error" class="error" role="alert" hidden></p>
+
+    <section id="ck-out" aria-live="polite">
+      <h2 class="sec">Result</h2>
+      <span id="ck-verdict" class="verdict"></span>
+      <ul id="ck-list" class="checklist panel"></ul>
+      <dl class="kv panel" id="ck-subnet"></dl>
+    </section>
+  </div>
+
+  <!-- ================= Subnet solver ================= -->
+  <div id="view-subnets" class="view" hidden>
+    <header class="vhead">
+      <h1>Subnet solver</h1>
+      <p class="lede">Enter a network and how many subnets or hosts you need. You get the new prefix, each step of the math, and where the answer sits in the lookup tables.</p>
+    </header>
+
+    <section class="panel controls" aria-label="Network to subnet">
+      <div class="row">
+        <div class="field grow">
+          <label for="sv-ip">Network address</label>
+          <input id="sv-ip" type="text" inputmode="decimal" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="172.16.0.0">
+        </div>
+        <div class="field pfx">
+          <label for="sv-prefix">Prefix</label>
+          <select id="sv-prefix"></select>
+        </div>
+      </div>
+      <div class="presets">
+        <span>Examples</span>
+        <button type="button" class="chip" data-net="10.0.0.0/8">10.0.0.0/8</button>
+        <button type="button" class="chip" data-net="172.16.0.0/16">172.16.0.0/16</button>
+        <button type="button" class="chip" data-net="192.168.10.0/24">192.168.10.0/24</button>
+      </div>
+      <div class="seg" role="radiogroup" aria-label="Solve for">
+        <input type="radio" name="sv-mode" id="sv-mode-subnets" value="subnets"><label for="sv-mode-subnets">Solve for subnets</label>
+        <input type="radio" name="sv-mode" id="sv-mode-hosts" value="hosts"><label for="sv-mode-hosts">Solve for hosts</label>
+      </div>
+      <div class="field">
+        <label for="sv-need" id="sv-need-label">Subnets needed</label>
+        <input id="sv-need" type="number" inputmode="numeric" min="1" step="1">
+      </div>
+      <p id="sv-note" class="note" hidden></p>
+    </section>
+
+    <p id="sv-error" class="error" role="alert" hidden></p>
+
+    <section id="sv-answer" aria-live="polite">
+      <h2 class="sec">Answer</h2>
+      <p id="sv-answer-line" class="answer-line"></p>
+      <dl id="sv-stats" class="stats"></dl>
+    </section>
+
+    <section id="sv-math">
+      <h2 class="sec">The math</h2>
+      <ol id="sv-steps" class="steps"></ol>
+    </section>
+
+    <section>
+      <h2 class="sec">Lookup tables</h2>
+      <div class="tstack" id="sv-tstack">
+        <div class="panel tcard t-host">
+          <h3>Hosts table</h3>
+          <p class="cap">Find the column where the new prefix lands. SM is the mask value for that octet, INC is the increment, and # is the addresses per subnet. Usable hosts = # − 2.</p>
+          <div class="scroll" id="sv-host-scroll"><table class="ref tbl-host" id="sv-tbl-host"></table></div>
+        </div>
+        <div class="panel tcard t-sub">
+          <h3 id="sv-sub-title">Subnets table</h3>
+          <p class="cap">Each borrowed bit doubles the number of subnets and halves the addresses in each one.</p>
+          <div class="scroll"><table class="ref" id="sv-tbl-sub"></table></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="sv-list-sec" class="panel">
+      <h2 class="sec">Subnet ranges</h2>
+      <p id="sv-list-cap" class="cap"></p>
+      <div id="sv-sublist" class="sublist"></div>
+      <button id="sv-more" class="btn" type="button">Show more</button>
+    </section>
+
+    <ul class="notes">
+      <li>Usable hosts = 2<sup>h</sup> − 2 because the first address is the network ID and the last is the broadcast. /31 (point-to-point links, RFC 3021) and /32 (a single host) don't follow that rule, so the solver stops at /30.</li>
+      <li>Subnets = 2<sup>n</sup> counts subnet zero and the all-ones subnet, which modern routers use. Some older courses use 2<sup>n</sup> − 2, so check which rule your exam expects.</li>
+    </ul>
+  </div>
+</main>
+
+<nav class="tabbar" aria-label="Tools">
+  <div class="tabs">
+    <a class="tab" href="#lookup" data-view="lookup">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></svg>
+      Lookup
+    </a>
+    <a class="tab" href="#check" data-view="check">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4M8.5 10l2.5 2.5 4.5-5"/></svg>
+      Check
+    </a>
+    <a class="tab" href="#subnets" data-view="subnets">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M12 3v18M3 12h18"/></svg>
+      Subnets
+    </a>
+  </div>
+</nav>
+
+<div id="toast" class="toast" role="status" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
