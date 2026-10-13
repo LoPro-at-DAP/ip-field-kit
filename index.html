@@ -386,6 +386,43 @@ table.ref { border-collapse: collapse; width: 100%; font: 400 13px/1.3 var(--fon
 }
 .notes { list-style: none; margin: 0; padding: 16px 0 0; display: grid; gap: 8px; font-size: 13.5px; color: var(--muted); max-width: 66ch; border-top: 1px solid var(--line); }
 
+/* Scan */
+.filebtn { position: relative; overflow: hidden; display: inline-block; }
+.filebtn input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+.filebtn:focus-within { outline: 2px solid var(--net); outline-offset: 2px; }
+textarea {
+  width: 100%;
+  min-width: 0;
+  font: 400 16px/1.45 var(--font-mono);
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+textarea::placeholder { color: var(--faint); }
+textarea:focus-visible { outline: 2px solid var(--net); outline-offset: 2px; }
+.progress { display: grid; gap: 6px; }
+.progress progress { width: 100%; height: 8px; accent-color: var(--borrow); }
+.progress span { font-size: 13.5px; color: var(--muted); }
+.preview { max-width: 100%; max-height: 240px; object-fit: contain; justify-self: start; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); }
+.hits { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.hit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 12px;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+.hit .top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.hit .val { font: 600 17px/1.2 var(--font-mono); overflow-wrap: anywhere; }
+.hit .acts { display: flex; gap: 6px; }
+.hit .ctx { grid-column: 1 / -1; font: 400 12.5px/1.35 var(--font-mono); color: var(--muted); overflow-wrap: anywhere; }
+
 /* Tab bar */
 .tabbar {
   position: fixed;
@@ -398,7 +435,7 @@ table.ref { border-collapse: collapse; width: 100%; font: 400 13px/1.3 var(--fon
   padding-bottom: env(safe-area-inset-bottom, 0px);
   padding-inline: env(safe-area-inset-left, 0px) env(safe-area-inset-right, 0px);
 }
-.tabs { max-width: 760px; margin-inline: auto; display: grid; grid-template-columns: repeat(3, 1fr); }
+.tabs { max-width: 760px; margin-inline: auto; display: grid; grid-template-columns: repeat(4, 1fr); }
 .tab { display: grid; justify-items: center; gap: 3px; padding: 9px 4px 10px; color: var(--muted); text-decoration: none; font: 600 12px/1.1 var(--font-body); }
 .tab svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .tab[aria-current="page"] { color: var(--borrow); }
@@ -517,6 +554,49 @@ table.ref { border-collapse: collapse; width: 100%; font: 400 13px/1.3 var(--fon
       <summary>Special address ranges</summary>
       <div class="scroll"><table class="ref" id="lk-ranges"></table></div>
     </details>
+  </div>
+
+  <!-- ================= Scan ================= -->
+  <div id="view-scan" class="view" hidden>
+    <header class="vhead">
+      <h1>Scan</h1>
+      <p class="lede">Photograph a screen, label, or printout, or paste command output. The IP addresses are pulled out and labeled.</p>
+    </header>
+
+    <section class="panel controls" aria-label="Photo or text to scan">
+      <div class="btnrow">
+        <label class="btn primary filebtn">Take photo<input id="sc-camera" type="file" accept="image/*" capture="environment"></label>
+        <label class="btn filebtn">Choose image<input id="sc-file" type="file" accept="image/*"></label>
+      </div>
+      <p class="cap">Text is read on this device and the photo never leaves it. The first scan downloads the text-recognition engine (about 7 MB). After that, scanning works offline.</p>
+      <div id="sc-progress" class="progress" hidden>
+        <progress id="sc-bar" max="1" value="0"></progress>
+        <span id="sc-status">Starting…</span>
+      </div>
+      <img id="sc-preview" class="preview" alt="The photo being scanned" hidden>
+      <div class="field">
+        <label for="sc-text">Text</label>
+        <textarea id="sc-text" rows="7" wrap="off" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="Paste ipconfig, ifconfig, ip addr, or router output here, or scan a photo."></textarea>
+      </div>
+      <div class="btnrow">
+        <button type="button" class="btn small" id="sc-example">Try an example</button>
+        <button type="button" class="btn small" id="sc-clear">Clear</button>
+      </div>
+    </section>
+
+    <p id="sc-error" class="error" role="alert" hidden></p>
+
+    <section id="sc-suggest" class="panel stack" hidden>
+      <h2 class="sec">Device settings found</h2>
+      <dl class="kv" id="sc-suggest-kv"></dl>
+      <button type="button" class="btn primary" id="sc-check">Check these settings</button>
+    </section>
+
+    <section id="sc-out" aria-live="polite" hidden>
+      <h2 class="sec" id="sc-count">Addresses found</h2>
+      <ul class="hits" id="sc-hits"></ul>
+    </section>
+    <p id="sc-none" class="cap" hidden>No IPv4 addresses found in this text. If the photo was blurry or at an angle, try again closer and straight on, or fix the text above.</p>
   </div>
 
   <!-- ================= Device check ================= -->
@@ -641,6 +721,10 @@ table.ref { border-collapse: collapse; width: 100%; font: 400 13px/1.3 var(--fon
     <a class="tab" href="#lookup" data-view="lookup">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></svg>
       Lookup
+    </a>
+    <a class="tab" href="#scan" data-view="scan">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l1.5-2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.5"/></svg>
+      Scan
     </a>
     <a class="tab" href="#check" data-view="check">
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4M8.5 10l2.5 2.5 4.5-5"/></svg>

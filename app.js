@@ -148,7 +148,7 @@
   }
 
   document.addEventListener('click', (e) => {
-    const btn = e.target.closest('.copy');
+    const btn = e.target.closest('[data-copy]');
     if (!btn) return;
     const text = btn.dataset.copy;
     const done = () => toast(`Copied ${text}`);
@@ -410,6 +410,13 @@
       maskEl.value = b.dataset.mask;
       run();
     }));
+    function load(ip, mask) {
+      ipEl.value = ip;
+      maskEl.value = mask || '';
+      run();
+      location.hash = '#lookup';
+    }
+
     $('lk-myip').addEventListener('click', async () => {
       const b = $('lk-myip');
       const label = b.textContent;
@@ -432,6 +439,7 @@
     });
 
     run();
+    return { load };
   }
 
   // ---------- Device check ----------
@@ -528,6 +536,273 @@
       run();
     }));
     run();
+    return {
+      load(ip, mask, gw) {
+        ipEl.value = ip; maskEl.value = mask; gwEl.value = gw || '';
+        run();
+        location.hash = '#check';
+      },
+    };
+  }
+
+  // ---------- Scan ----------
+  const ROLE_LABEL = { ip: 'IP address', mask: 'Mask', gateway: 'Gateway', dns: 'DNS server', dhcp: 'DHCP server', broadcast: 'Broadcast', address: 'Address' };
+  const ROLE_CLASS = { ip: 'private', mask: '', gateway: 'special', dns: 'public', dhcp: '', broadcast: '', address: '' };
+  // Checked in order against the words just before each address on its line.
+  const ROLE_WORDS = [
+    ['dhcp', /dhcp/i],
+    ['dns', /dns|name ?server/i],
+    ['gateway', /gateway|default via|\bvia\b|\bgw\b|router|next.?hop/i],
+    ['mask', /mask/i],
+    ['broadcast', /broadcast|\bbrd\b|bcast/i],
+    ['ip', /ipv4|ip address|\binet\b|\baddr(ess)?\b|\bip\b/i],
+  ];
+  const IP_IN_TEXT = /(^|[^\d])(\d{1,3}) ?[.,] ?(\d{1,3}) ?[.,] ?(\d{1,3}) ?[.,] ?(\d{1,3})(?: ?\/ ?(\d{1,2}))?(?!\d)/g;
+
+  // Fix common OCR mix-ups (O→0, l→1, S→5, B→8) inside runs that look like addresses.
+  function fixOcr(line) {
+    return line.replace(/[0-9OoIl|SB][0-9OoIl|SB.,]{6,}/g, (tok) =>
+      (tok.match(/[.,]/g) || []).length >= 3 && (tok.match(/\d/g) || []).length >= 4
+        ? tok.replace(/[Oo]/g, '0').replace(/[Il|]/g, '1').replace(/S/g, '5').replace(/B/g, '8')
+        : tok);
+  }
+
+  function extractIPs(text) {
+    const items = [];
+    const seen = new Set();
+    let last = null;
+    text.split(/\r?\n/).forEach((raw, lineNo) => {
+      const line = fixOcr(raw);
+      IP_IN_TEXT.lastIndex = 0;
+      let m, prevEnd = 0;
+      const lineHits = [];
+      while ((m = IP_IN_TEXT.exec(line))) {
+        const start = m.index + m[1].length;
+        const octs = [m[2], m[3], m[4], m[5]].map(Number);
+        const prefix = m[6] !== undefined ? Number(m[6]) : null;
+        if (octs.some((o) => o > 255) || (prefix !== null && prefix > 32)) { prevEnd = IP_IN_TEXT.lastIndex; continue; }
+        const n = ((octs[0] * 256 + octs[1]) * 256 + octs[2]) * 256 + octs[3];
+        const before = line.slice(prevEnd, start);
+        let role = null;
+        for (const [r, re] of ROLE_WORDS) if (re.test(before)) { role = r; break; }
+        if (!role) {
+          const onlyThis = line.replace(m[0].slice(m[1].length), '').replace(/[\s:.,()\[\]-]/g, '') === '';
+          const mp = prefix === null ? prefixOfMask(n) : -1;
+          if (onlyThis && last && last.lineNo === lineNo - 1 && !/[a-z]/i.test(before)) role = last.role;
+          else if (mp >= 8) role = 'mask';
+          else role = 'address';
+        }
+        lineHits.push({ n, prefix, role, lineNo, line: raw });
+        prevEnd = IP_IN_TEXT.lastIndex;
+      }
+      lineHits.forEach((h) => {
+        const key = `${h.role}|${h.n}|${h.prefix}`;
+        last = h;
+        if (seen.has(key)) return;
+        seen.add(key);
+        items.push(h);
+      });
+    });
+    return items;
+  }
+
+  function settingsFrom(items) {
+    const ipIdx = items.findIndex((i) => i.role === 'ip' && Math.floor(i.n / 16777216) !== 127 && prefixOfMask(i.n) < 8);
+    if (ipIdx < 0) return null;
+    const ipItem = items[ipIdx];
+    const after = items.slice(ipIdx + 1);
+    let mask = ipItem.prefix !== null ? '/' + ipItem.prefix : null;
+    if (!mask) { const mi = after.find((i) => i.role === 'mask'); if (mi) mask = ipStr(mi.n); }
+    if (!mask) return null;
+    const gw = after.find((i) => i.role === 'gateway') || items.find((i) => i.role === 'gateway');
+    return { ip: ipStr(ipItem.n), mask, gw: gw ? ipStr(gw.n) : '' };
+  }
+
+  const SCAN_EXAMPLE = `Windows IP Configuration
+
+Wireless LAN adapter Wi-Fi:
+
+   Connection-specific DNS Suffix  . : lan
+   IPv4 Address. . . . . . . . . . . : 192.168.1.50
+   Subnet Mask . . . . . . . . . . . : 255.255.255.192
+   Default Gateway . . . . . . . . . : 192.168.1.65
+   DNS Servers . . . . . . . . . . . : 1.1.1.1
+                                       8.8.8.8`;
+
+  function initScan(lookup, check) {
+    const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+    const STATUS = {
+      'loading tesseract core': 'Downloading the text engine',
+      'initializing tesseract': 'Starting the text engine',
+      'loading language traineddata': 'Downloading English language data',
+      'loaded language traineddata': 'Starting the text engine',
+      'initializing api': 'Starting the text engine',
+      'recognizing text': 'Reading text',
+    };
+    const textEl = $('sc-text');
+    let workerP = null;
+    let previewUrl = null;
+    let busy = false;
+    let items = [];
+    let found = null;
+    let timer = 0;
+
+    function showProgress(label, frac) {
+      $('sc-progress').hidden = false;
+      $('sc-status').textContent = `${label}${frac > 0 ? ` ${Math.round(frac * 100)}%` : ''}`;
+      $('sc-bar').value = frac;
+    }
+
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const el = document.createElement('script');
+        el.src = src;
+        el.onload = resolve;
+        el.onerror = () => reject(new Error('script'));
+        document.head.appendChild(el);
+      });
+    }
+
+    function getWorker() {
+      if (!workerP) {
+        workerP = (async () => {
+          if (!window.Tesseract) await loadScript(TESSERACT_URL);
+          const w = await window.Tesseract.createWorker('eng', 1, {
+            logger: (m) => showProgress((STATUS[m.status] || 'Working') + '…', m.progress || 0),
+          });
+          await w.setParameters({ preserve_interword_spaces: '1' });
+          return w;
+        })().catch((e) => { workerP = null; throw e; });
+      }
+      return workerP;
+    }
+
+    // Grayscale, stretch contrast, and turn light-on-dark screens into dark-on-light text.
+    async function prepImage(url) {
+      const img = await new Promise((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = () => reject(new Error('decode'));
+        i.src = url;
+      });
+      const scale = Math.min(2, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
+      const w = Math.max(1, Math.round(img.naturalWidth * scale));
+      const h = Math.max(1, Math.round(img.naturalHeight * scale));
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(img, 0, 0, w, h);
+      const im = ctx.getImageData(0, 0, w, h);
+      const px = im.data;
+      const hist = new Uint32Array(256);
+      let sum = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        const y = ((px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114) / 1000) | 0;
+        px[i] = y;
+        hist[y]++;
+        sum += y;
+      }
+      const count = px.length / 4;
+      const invert = sum / count < 110;
+      let lo = 0, hi = 255, acc = 0;
+      for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= count * 0.02) { lo = v; break; } }
+      acc = 0;
+      for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= count * 0.02) { hi = v; break; } }
+      const range = Math.max(1, hi - lo);
+      for (let i = 0; i < px.length; i += 4) {
+        let y = Math.max(0, Math.min(255, ((px[i] - lo) * 255) / range));
+        if (invert) y = 255 - y;
+        px[i] = px[i + 1] = px[i + 2] = y;
+      }
+      ctx.putImageData(im, 0, 0);
+      return c;
+    }
+
+    async function scanFile(file) {
+      if (!file || busy) return;
+      busy = true;
+      $('sc-error').hidden = true;
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = URL.createObjectURL(file);
+      $('sc-preview').src = previewUrl;
+      $('sc-preview').hidden = false;
+      showProgress('Preparing the photo…', 0);
+      try {
+        const canvas = await prepImage(previewUrl);
+        const worker = await getWorker();
+        showProgress('Reading text…', 0);
+        const { data } = await worker.recognize(canvas);
+        textEl.value = String(data.text || '').replace(/\n{3,}/g, '\n\n').trim();
+        update();
+        if (!items.length) toast('No addresses found. Try a closer, straighter photo.');
+      } catch (e) {
+        const err = $('sc-error');
+        err.textContent = e.message === 'decode'
+          ? "That file couldn't be opened as an image. Try a JPEG or PNG."
+          : navigator.onLine
+            ? "Couldn't read the photo. Try again, or paste the text instead."
+            : "The text engine isn't on this device yet. Connect to the internet and scan once; after that it works offline.";
+        err.hidden = false;
+      } finally {
+        busy = false;
+        $('sc-progress').hidden = true;
+        $('sc-camera').value = '';
+        $('sc-file').value = '';
+      }
+    }
+
+    function maskFor(idx) {
+      const it = items[idx];
+      if (it.prefix !== null) return '/' + it.prefix;
+      if (it.role !== 'ip') return '';
+      const mi = items.slice(idx + 1).find((i) => i.role === 'mask' || i.role === 'ip');
+      return mi && mi.role === 'mask' ? ipStr(mi.n) : '';
+    }
+
+    function update() {
+      const text = textEl.value;
+      items = extractIPs(text);
+      found = settingsFrom(items);
+      const has = items.length > 0;
+      $('sc-out').hidden = !has;
+      $('sc-none').hidden = has || text.trim() === '';
+      $('sc-suggest').hidden = !found;
+      if (found) {
+        $('sc-suggest-kv').innerHTML = kvRows([
+          ['IP address', found.ip, null],
+          ['Mask', found.mask, null],
+          ['Gateway', found.gw || '<span class="muted">Not found</span>', null],
+        ]);
+      }
+      $('sc-count').textContent = `${fmt(items.length)} ${items.length === 1 ? 'address' : 'addresses'} found`;
+      $('sc-hits').innerHTML = items.map((it, i) => {
+        const val = ipStr(it.n) + (it.prefix !== null ? `/${it.prefix}` : '');
+        const ctx = it.line.replace(/(\s*\.){3,}\s*/g, ' … ').trim();
+        return `<li class="hit"><div class="top"><span class="badge ${ROLE_CLASS[it.role]}">${ROLE_LABEL[it.role]}</span><span class="val">${val}</span></div>` +
+          `<div class="acts">${it.role !== 'mask' ? `<button type="button" class="btn small" data-hit="${i}">Look up</button>` : ''}<button type="button" class="btn small" data-copy="${val}">Copy</button></div>` +
+          `<div class="ctx">${esc(ctx)}</div></li>`;
+      }).join('');
+    }
+
+    textEl.addEventListener('input', () => { clearTimeout(timer); timer = setTimeout(update, 200); });
+    $('sc-camera').addEventListener('change', (e) => scanFile(e.target.files && e.target.files[0]));
+    $('sc-file').addEventListener('change', (e) => scanFile(e.target.files && e.target.files[0]));
+    $('sc-example').addEventListener('click', () => { textEl.value = SCAN_EXAMPLE; update(); });
+    $('sc-clear').addEventListener('click', () => {
+      textEl.value = '';
+      $('sc-preview').hidden = true;
+      $('sc-error').hidden = true;
+      update();
+    });
+    $('sc-hits').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-hit]');
+      if (!b) return;
+      const i = Number(b.dataset.hit);
+      lookup.load(ipStr(items[i].n), maskFor(i));
+    });
+    $('sc-check').addEventListener('click', () => { if (found) check.load(found.ip, found.mask, found.gw); });
+    update();
   }
 
   // ---------- Subnet solver ----------
@@ -849,10 +1124,11 @@
 
   // ---------- App shell ----------
   const solver = initSolver();
-  initLookup(solver);
-  initCheck();
+  const lookup = initLookup(solver);
+  const check = initCheck();
+  initScan(lookup, check);
 
-  const VIEWS = ['lookup', 'check', 'subnets'];
+  const VIEWS = ['lookup', 'scan', 'check', 'subnets'];
   function route() {
     let v = location.hash.slice(1);
     if (!VIEWS.includes(v)) v = store.get('view', 'lookup');

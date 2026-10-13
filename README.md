@@ -3,6 +3,7 @@
 An installable web app (PWA) for IPv4 work in the field. It works offline once it has been opened one time.
 
 - **Lookup**: enter an IP and a mask (`/26`, `255.255.255.192`, or a wildcard like `0.0.0.63`) to get the network, usable range, broadcast, host position, address type (private, public, APIPA, CGNAT, loopback, multicast…), class, binary, hex, and reverse DNS name. You can also step through neighboring subnets.
+- **Scan**: take a photo of a screen, label, or printout (or paste command output) and the app pulls out every IPv4 address, labeled as IP, mask, gateway, DNS, and so on. It understands `ipconfig`, `ifconfig`, `ip addr`, `ip route`, and Cisco-style config. When it finds a full set of settings, one tap sends them to Check.
 - **Check**: enter a device's IP, mask, and gateway to catch common misconfigurations: a gateway outside the subnet, a network or broadcast address assigned to a device, or an APIPA address from a failed DHCP lease.
 - **Subnets**: the borrowing-bits solver, with worked math and the hosts and subnets lookup tables.
 
@@ -46,7 +47,9 @@ After you change any file, bump `VERSION` in `sw.js` (for example `ipkit-v2`). I
 
 ## What goes online
 
-Everything is computed on the device. Two optional buttons use the network, and only when tapped:
+Everything is computed on the device, including reading text from photos: images are never uploaded. The text-recognition engine (Tesseract.js, about 7 MB) is downloaded from cdn.jsdelivr.net the first time you scan and cached for offline use after that.
+
+Two optional buttons use the network, and only when tapped:
 
 - **Look up owner** sends the address to `rdap.org`, which forwards to the regional internet registry (ARIN, RIPE NCC, APNIC, LACNIC, or AFRINIC).
 - **Use my public IP** asks `api.ipify.org` for the device's public address.

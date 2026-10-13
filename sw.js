@@ -1,7 +1,8 @@
 // IP Field Kit service worker.
 // Bump VERSION whenever you change any file in SHELL so installed copies pick up the update.
-const VERSION = 'ipkit-v1';
+const VERSION = 'ipkit-v2';
 const FONT_CACHE = 'ipkit-fonts';
+const OCR_CACHE = 'ipkit-ocr'; // text-recognition engine, fetched on the first scan
 const SHELL = [
   './',
   './index.html',
@@ -23,7 +24,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== VERSION && k !== FONT_CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k !== VERSION && k !== FONT_CACHE && k !== OCR_CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -58,5 +59,19 @@ self.addEventListener('fetch', (event) => {
       })
     );
   }
+  // Text-recognition engine (versioned URLs, so a cached copy never goes stale).
+  if (url.hostname === 'cdn.jsdelivr.net') {
+    event.respondWith(
+      caches.open(OCR_CACHE).then(async (cache) => {
+        const hit = await cache.match(req);
+        if (hit) return hit;
+        const res = await fetch(req);
+        if (res.ok || res.type === 'opaque') cache.put(req, res.clone());
+        return res;
+      })
+    );
+    return;
+  }
+
   // Everything else (registry and public-IP lookups) goes straight to the network.
 });
