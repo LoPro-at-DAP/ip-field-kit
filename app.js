@@ -909,6 +909,17 @@ Wireless LAN adapter Wi-Fi:
   const MARK_WORDS = { ok: 'Pass', bad: 'Fail', warn: 'Warning', info: 'Note' };
   const fill = (tpl, v) => tpl.replace(/\{(\w+)\}/g, (all, k) => (v[k] !== undefined ? v[k] : all));
 
+  // A command or filter with a Copy button, a description, and optional example output.
+  function cmdHTML(t, v) {
+    const c = fill(t.cmd, v);
+    const tag = t.tag ? `<span class="badge special">${esc(t.tag)}</span>` : '';
+    const outs = (t.out || []).map(([state, line, note]) =>
+      `<li><span class="mark ${state}" aria-hidden="true">${MARKS[state]}</span><div><code><span class="sr">${MARK_WORDS[state]}: </span>${esc(fill(line, v))}</code><p>${esc(fill(note, v))}</p></div></li>`
+    ).join('');
+    return `<div class="cmd"><div class="cmd-line"><code>${esc(c)}</code><button type="button" class="btn small" data-copy="${esc(c)}">Copy</button></div>` +
+      `<p class="what">${tag}${esc(fill(t.what, v))}</p>${outs ? `<ul class="outs">${outs}</ul>` : ''}</div>`;
+  }
+
   function initTests() {
     const saved = store.get('tests', {}) || {};
     const st = {
@@ -935,16 +946,6 @@ Wireless LAN adapter Wi-Fi:
         payload8: okMtu ? String(mtu - 20) : '<size>',
         okMtu,
       };
-    }
-
-    function cmdHTML(t, v) {
-      const c = fill(t.cmd, v);
-      const tag = t.tag ? `<span class="badge special">${esc(t.tag)}</span>` : '';
-      const outs = (t.out || []).map(([state, line, note]) =>
-        `<li><span class="mark ${state}" aria-hidden="true">${MARKS[state]}</span><div><code><span class="sr">${MARK_WORDS[state]}: </span>${esc(fill(line, v))}</code><p>${esc(fill(note, v))}</p></div></li>`
-      ).join('');
-      return `<div class="cmd"><div class="cmd-line"><code>${esc(c)}</code><button type="button" class="btn small" data-copy="${esc(c)}">Copy</button></div>` +
-        `<p class="what">${tag}${esc(fill(t.what, v))}</p>${outs ? `<ul class="outs">${outs}</ul>` : ''}</div>`;
     }
 
     function render() {
@@ -998,6 +999,291 @@ Wireless LAN adapter Wi-Fi:
     syncInputs();
     render();
     return { render };
+  }
+
+  // ---------- Tunnel and label overhead ----------
+  const ESP = {
+    cbc1: { name: 'AES-CBC + SHA-1', iv: 16, icv: 12, pad: 15 },
+    cbc256: { name: 'AES-CBC + SHA-256', iv: 16, icv: 16, pad: 15 },
+    gcm: { name: 'AES-GCM', iv: 8, icv: 16, pad: 3 },
+  };
+  // Worst case: outer IP (tunnel mode only) + SPI/sequence + IV + max padding + pad length/next header + integrity check.
+  const espBytes = (mode, c) => (mode === 'tunnel' ? 20 : 0) + 8 + ESP[c].iv + ESP[c].pad + 2 + ESP[c].icv;
+
+  // [min, max, cause] for working backward from the largest MTU that passed.
+  const OVERHEAD_CAUSES = [
+    [4, 4, 'One MPLS label, or a VLAN tag that a device counts against the MTU'],
+    [8, 8, 'PPPoE, or two MPLS labels (MPLS VPN) that the core has no room for'],
+    [12, 12, 'Three MPLS labels, for example an MPLS VPN with traffic engineering'],
+    [16, 16, 'PPPoE plus two MPLS labels, or four MPLS labels'],
+    [24, 24, 'GRE'],
+    [28, 28, 'GRE with a tunnel key, common on mGRE / DMVPN'],
+    [32, 36, 'GRE over PPPoE'],
+    [50, 50, 'VXLAN'],
+    [54, 77, 'IPsec ESP tunnel mode'],
+    [58, 85, 'GRE over IPsec transport mode (DMVPN)'],
+    [60, 60, 'WireGuard over IPv4'],
+    [62, 85, 'IPsec tunnel mode through NAT (NAT-T)'],
+    [78, 105, 'GRE over IPsec tunnel mode'],
+    [80, 80, 'WireGuard over IPv6'],
+  ];
+
+  const IOS_CHECKS = [
+    { cmd: 'ping {target} size {mtu} df-bit', tag: 'Cisco IOS', what: 'On Cisco, size is the whole IP packet with headers, so use the MTU itself, not MTU − 28.' },
+    { cmd: 'ping vrf <vrf-name> {target} size {mtu} df-bit', tag: 'Cisco IOS', what: 'The same test inside an MPLS VPN.' },
+    { cmd: 'ping mpls ipv4 <remote-loopback>/32 sweep 1400 1520 4', tag: 'Cisco IOS', what: 'Sends labeled pings of growing size along the label-switched path. Where replies stop is the largest packet the MPLS core carries.' },
+    { cmd: 'show interfaces Tunnel0 | include MTU', tag: 'Cisco IOS', what: "Shows the tunnel's MTU and its transport MTU, the room left after the GRE headers." },
+    { cmd: 'show ip interface Tunnel0 | include MTU', tag: 'Cisco IOS', what: 'Shows the IP MTU applied to packets entering the tunnel.' },
+    { cmd: 'show mpls interfaces detail', tag: 'Cisco IOS', what: 'Shows the MPLS MTU on each interface.' },
+    { cmd: 'show crypto ipsec sa | include mtu', tag: 'Cisco IOS', what: 'Shows the path MTU and IP MTU each IPsec tunnel is using.' },
+  ];
+
+  function initOverhead() {
+    const ids = ['base', 'mpls', 'gre', 'ipsec', 'cipher', 'pppoe', 'natt', 'vxlan', 'wg', 'passed'];
+    const el = Object.fromEntries(ids.map((k) => [k, $('ovh-' + k)]));
+    const saved = store.get('ovh', {}) || {};
+    el.base.value = typeof saved.base === 'string' ? saved.base : '1500';
+    ['mpls', 'gre', 'ipsec', 'cipher'].forEach((k) => { if (typeof saved[k] === 'string') el[k].value = saved[k]; });
+    if (!el.cipher.value) el.cipher.value = 'cbc1';
+    ['pppoe', 'natt', 'vxlan', 'wg'].forEach((k) => { el[k].checked = saved[k] === true; });
+    el.passed.value = typeof saved.passed === 'string' ? saved.passed : '';
+
+    function render() {
+      const base = Number(el.base.value.trim());
+      const okBase = el.base.value.trim() !== '' && Number.isInteger(base) && base >= 576 && base <= 65535;
+      const mpls = Number(el.mpls.value), gre = Number(el.gre.value), mode = el.ipsec.value, c = el.cipher.value;
+      el.cipher.disabled = !mode;
+      el.natt.disabled = !mode;
+      const parts = [];
+      if (el.pppoe.checked) parts.push(['PPPoE', 8]);
+      if (mpls) parts.push([`${mpls} MPLS label${mpls > 1 ? 's' : ''}`, 4 * mpls]);
+      if (gre) parts.push([gre === 28 ? 'GRE with key' : 'GRE', gre]);
+      if (mode) parts.push([`IPsec ${mode} mode, ${ESP[c].name}`, espBytes(mode, c)]);
+      if (mode && el.natt.checked) parts.push(['NAT-T', 8]);
+      if (el.vxlan.checked) parts.push(['VXLAN', 50]);
+      if (el.wg.checked) parts.push(['WireGuard', 60]);
+      const total = parts.reduce((a, [, n]) => a + n, 0);
+      const mtu = okBase ? base - total : null;
+
+      let html = '';
+      if (!okBase) html = '<p class="error">Enter a link MTU from 576 to 65535.</p>';
+      else if (!parts.length) html = `<p class="cap">Nothing selected, so the full ${base} bytes are available.</p>`;
+      else if (mtu < 576) html = '<p class="error">That stack leaves less than 576 bytes, the smallest MTU IPv4 hosts must accept.</p>';
+      else {
+        html = `<p class="calc">${base} − ${parts.map(([name, n]) => `${n} (${esc(name)})`).join(' − ')} = <b>${mtu}</b></p>` +
+          `<dl class="kv">${kvRows([
+            ['IP MTU left', `<b>${mtu}</b>`, String(mtu)],
+            ['Ping data size', String(mtu - 28), String(mtu - 28)],
+            ['TCP MSS', String(mtu - 40), String(mtu - 40)],
+            ['Total overhead', `${total} bytes`, null],
+          ])}</dl>`;
+        if (gre || mode) {
+          html += cmdHTML({ cmd: `interface Tunnel0\n ip mtu ${mtu}\n ip tcp adjust-mss ${mtu - 40}`, tag: 'Cisco IOS',
+            what: "Sets the tunnel's IP MTU and clamps TCP so hosts never send more than fits. Cisco's usual DMVPN values, 1400 and 1360, leave a little extra room." }, {});
+        }
+        if (mpls) {
+          html += cmdHTML({ cmd: `mpls mtu ${base + 4 * mpls}`, tag: 'Cisco IOS',
+            what: `Labels only cost you MTU when core links have no room for them. On each core interface, allow ${base} + ${4 * mpls} bytes so labeled ${base}-byte packets fit. Some platforms need the interface mtu raised first.` }, {});
+        }
+      }
+      $('ovh-result').innerHTML = html;
+
+      // Work backward
+      const passed = Number(el.passed.value.trim());
+      let why = '';
+      if (el.passed.value.trim() !== '' && okBase) {
+        if (!Number.isInteger(passed) || passed < 68) why = '<p class="error">Enter the MTU (not the ping data size) of the largest test that passed.</p>';
+        else if (passed > base) why = `<p class="error">That's larger than the link MTU of ${base}.</p>`;
+        else {
+          const gap = base - passed;
+          const hits = OVERHEAD_CAUSES.filter(([lo, hi]) => gap >= lo && gap <= hi);
+          why = `<p class="calc">${base} − ${passed} = <b>${gap}</b> bytes missing</p>`;
+          if (gap === 0) why += '<p class="cap">Nothing is missing. The full MTU gets through.</p>';
+          else if (hits.length) why += `<ul class="matches">${hits.map(([lo, hi, cause]) => `<li><b>${lo === hi ? lo : `${lo}–${hi}`}</b><span>${esc(cause)}</span></li>`).join('')}</ul>`;
+          else why += '<p class="cap">No single common encapsulation matches. Several layers may be stacked: try combinations in the calculator above.</p>';
+        }
+      }
+      $('ovh-why').innerHTML = why;
+
+      const target = $('ts-target').value.trim() || '<target>';
+      const v = { target, mtu: mtu && mtu >= 576 ? String(mtu) : okBase ? String(base) : '1500' };
+      $('ovh-ios').innerHTML = IOS_CHECKS.map((t) => cmdHTML(t, v)).join('');
+
+      const out = {};
+      ids.forEach((k) => { out[k] = el[k].type === 'checkbox' ? el[k].checked : el[k].value; });
+      store.set('ovh', out);
+    }
+
+    ids.forEach((k) => el[k].addEventListener(el[k].tagName === 'INPUT' && el[k].type === 'text' ? 'input' : 'change', render));
+    $('ts-target').addEventListener('input', render);
+    render();
+  }
+
+  // ---------- Capture (Wireshark) ----------
+  const WS_SIZE = [
+    ['icmp && data.len == {size}', "Your Don't Fragment pings with {size} bytes of data, from ping -f -l {size} or ping -M do -s {size}."],
+    ['ip.len > 1400', 'Large packets. ip.len counts the IP header plus data, so a full-size packet is 1500.'],
+    ['frame.len > 1514', 'Frames bigger than standard Ethernet (a 1500-byte packet plus the 14-byte header): jumbo frames or "baby giants".'],
+    ['ip.flags.df == 1', "Packets with Don't Fragment set."],
+    ['ip.flags.mf == 1 || ip.frag_offset > 0', 'IP fragments. Something split a packet that was too big.'],
+    ['icmp.type == 3 && icmp.code == 4', '"Fragmentation needed" messages. The icmp.mtu field shows the MTU of the next hop.'],
+    ['tcp.flags.syn == 1 && tcp.options.mss_val < 1460', 'Connections with a reduced maximum segment size, a sign of PPPoE, a tunnel, or MSS clamping.'],
+    ['tcp.analysis.retransmission && tcp.len > 1300', 'Large segments being sent again, a typical sign of an MTU black hole.'],
+    ['gre || mpls || esp || vxlan || udp.port == 4500', 'Tunnel and label traffic that adds overhead. UDP 4500 is IPsec through NAT.'],
+  ];
+  const WS_ARP = [
+    ['arp', 'All ARP traffic.'],
+    ['arp.opcode == 1', 'Requests: "Who has this IP?"'],
+    ['arp.opcode == 2', 'Replies: "This IP is at this MAC."'],
+    ['arp.dst.proto_ipv4 == {ip}', 'Who is asking for {ip}.'],
+    ['arp.src.proto_ipv4 == {ip}', '{ip} announcing itself or answering. Two different MACs here means a duplicate IP.'],
+    ['arp.src.proto_ipv4 == arp.dst.proto_ipv4', 'Gratuitous ARP: a device announcing its own IP, usually right after boot or a failover.'],
+    ['arp.src.proto_ipv4 == 0.0.0.0', 'ARP probes: a device checking whether an IP is free before using it. The target IP is the one it wants.'],
+    ['arp.duplicate-address-detected', 'Wireshark found two MACs claiming the same IP.'],
+    ['arp.opcode == 1 && !(arp.src.proto_ipv4 == {subnet}) && !(arp.src.proto_ipv4 == 0.0.0.0)', 'ARP requests from addresses outside {subnet}: a device set up with the wrong IP or mask for this network.'],
+  ];
+  const WS_FIND = [
+    ['eth.src == {mac}', 'Everything the device sends, using the MAC on its label.'],
+    ['arp && eth.src == {mac}', 'Its ARP traffic. The sender IP is its address. The target IP is often its gateway, which hints at the subnet.'],
+    ['dhcp.option.dhcp == 1', 'DHCP Discover: a device looking for a DHCP server. dhcp.option.requested_ip_address shows the last IP it had. Wireshark before version 3.0 calls this bootp.'],
+    ['ip.addr == 169.254.0.0/16', 'IPv4 link-local (APIPA): a device that gave itself an address because it found no DHCP server.'],
+    ['ipv6.src == fe80::/10', 'IPv6 link-local. Nearly every modern device has one, even with no IPv4 set up.'],
+    ['icmpv6.type == 135 && ipv6.src == ::', 'IPv6 duplicate-address checks, which show the address a device is about to use.'],
+    ['icmpv6.type >= 133 && icmpv6.type <= 136', 'IPv6 neighbor discovery: router and neighbor solicitations and advertisements.'],
+    ['lldp || cdp', 'Switches, phones, and access points announcing their name, port, and management IP (lldp.mgn.addr.ip4).'],
+    ['mdns || llmnr || nbns || ssdp', 'Devices announcing names and services, such as printers, cameras, and IoT gear.'],
+    ['eth.dst == ff:ff:ff:ff:ff:ff', 'All broadcast traffic, where most discovery happens.'],
+  ];
+  const WS_CAPTURE = [
+    ['arp or udp port 67 or udp port 68 or icmp6 or udp port 5353 or ether proto 0x88cc', 'Discovery traffic only: ARP, DHCP, IPv6 neighbor discovery, mDNS, and LLDP (EtherType 0x88cc).'],
+    ['ether host {mac}', 'Only frames to or from the device.'],
+  ];
+
+  function normMac(str) {
+    const hex = String(str).replace(/[^0-9a-f]/gi, '');
+    return hex.length === 12 ? hex.toLowerCase().match(/../g).join(':') : null;
+  }
+
+  // IPv6 link-local address built from a MAC (EUI-64). Many newer systems use a random one instead.
+  function eui64(mac) {
+    const b = mac.split(':').map((x) => parseInt(x, 16));
+    b[0] ^= 2;
+    return 'fe80::' + [(b[0] << 8) | b[1], (b[2] << 8) | 0xff, 0xfe00 | b[3], (b[4] << 8) | b[5]].map((w) => w.toString(16)).join(':');
+  }
+
+  function laptopAddress(dev, p) {
+    if (p >= 32) return null;
+    const net = netOf(dev, p), size = P2(32 - p);
+    if (p === 31) return net === dev ? net + 1 : net;
+    const first = net + 1, last = net + size - 2;
+    const picks = [];
+    if (size >= 16) for (let x = last - 4; x >= first && picks.length < 8; x--) picks.push(x);
+    for (let x = first; x <= last && picks.length < 24; x++) picks.push(x);
+    const pick = picks.find((x) => x !== dev);
+    return pick === undefined ? null : pick;
+  }
+
+  function initCapture() {
+    const saved = store.get('capture', {}) || {};
+    const st = {
+      os: saved.os === 'linux' ? 'linux' : 'windows',
+      ip: typeof saved.ip === 'string' ? saved.ip : '192.168.0.10',
+      prefix: typeof saved.prefix === 'string' ? saved.prefix : '/24',
+      mac: typeof saved.mac === 'string' ? saved.mac : '00:11:22:33:44:55',
+      size: typeof saved.size === 'string' ? saved.size : '1472',
+      ifaceWin: typeof saved.ifaceWin === 'string' ? saved.ifaceWin : 'Ethernet',
+      ifaceLinux: typeof saved.ifaceLinux === 'string' ? saved.ifaceLinux : 'eth0',
+    };
+    const f = { ip: $('ws-ip'), prefix: $('ws-prefix'), mac: $('ws-mac'), size: $('ws-size'), iface: $('ws-iface') };
+
+    function values() {
+      const ipN = parseIP(st.ip);
+      const mk = parseMask(st.prefix);
+      const dev = ipN !== null ? ipN : parseIP('192.168.0.10');
+      // Link-local is always a /16. Pick the laptop address near the device, away from the reserved first and last /24.
+      const apipa = netOf(dev, 16) === parseIP('169.254.0.0');
+      const p = apipa ? 16 : mk.p !== undefined ? mk.p : 24;
+      const mac = normMac(st.mac) || '00:11:22:33:44:55';
+      const size = Number(st.size.trim());
+      const iface = (st.os === 'windows' ? st.ifaceWin : st.ifaceLinux).trim() || (st.os === 'windows' ? 'Ethernet' : 'eth0');
+      const laptop = laptopAddress(dev, apipa ? 24 : p);
+      return {
+        devN: dev, p, mac, iface, laptopN: laptop, apipa,
+        ip: ipStr(dev),
+        subnet: `${ipStr(netOf(dev, p))}/${p}`,
+        size: Number.isInteger(size) && size >= 0 && size <= 65500 ? String(size) : '1472',
+        prefix: String(p),
+        mask: maskStr(p),
+        laptop: laptop !== null ? ipStr(laptop) : '<laptop-ip>',
+        ll: eui64(mac),
+      };
+    }
+
+    const list = (rows, v) => rows.map(([cmd, what]) => cmdHTML({ cmd, what }, v)).join('');
+
+    function steps(v) {
+      const win = st.os === 'windows';
+      const c = (t) => cmdHTML(t, v);
+      return [
+        ['Start capturing, then power on the device', '<p>Boot is when a device sends gratuitous ARP, DHCP requests, and LLDP. Use the filters under "Find a device\'s address" to spot them.</p>'],
+        ['Enter its address above', "<p>Put the IP you found in <b>Device or gateway IP</b>. If you only learned its gateway, a /24 around that gateway is a reasonable first guess.</p>"],
+        ["Check that your laptop's address is free", win
+          ? c({ cmd: 'ping -n 2 {laptop}', what: 'No reply, and no entry for {laptop} in arp -a afterward, means nothing is using it.' })
+          : c({ cmd: 'sudo arping -D -c 3 -I {iface} {laptop}', what: '"Received 0 response(s)" means nothing is using {laptop}.' })],
+        ['Give your laptop the address', win
+          ? c({ cmd: 'netsh interface ipv4 set address name="{iface}" static {laptop} {mask}', tag: 'Run as administrator', what: 'No gateway is needed on a direct link.' })
+          : c({ cmd: 'sudo ip addr add {laptop}/{prefix} dev {iface}', what: 'Adds the address alongside any you already have. No gateway is needed on a direct link.' })],
+        ['Connect', c({ cmd: win ? 'ping -n 4 {ip}' : 'ping -c 4 {ip}', what: 'Then open http://{ip} in a browser, or connect with SSH or the vendor tool.' })],
+        ['Put your laptop back afterward', win
+          ? c({ cmd: 'netsh interface ipv4 set address name="{iface}" source=dhcp', tag: 'Run as administrator', what: 'Returns the interface to DHCP.' })
+          : c({ cmd: 'sudo ip addr del {laptop}/{prefix} dev {iface}', what: 'Removes the temporary address.' })],
+      ];
+    }
+
+    function render() {
+      const v = values();
+      $('ws-size-list').innerHTML = list(WS_SIZE, v);
+      $('ws-offload').innerHTML = st.os === 'windows'
+        ? cmdHTML({ cmd: 'Disable-NetAdapterLso -Name "{iface}"', tag: 'PowerShell as administrator', what: 'Turns off large send offload so captured sizes match the wire. Re-enable it afterward with Enable-NetAdapterLso.' }, v)
+        : cmdHTML({ cmd: 'sudo ethtool -K {iface} tso off gso off gro off', what: 'Turns off segmentation offload so captured sizes match the wire. Run it again with "on" afterward.' }, v);
+      $('ws-arp-list').innerHTML = list(WS_ARP, v);
+      $('ws-find-list').innerHTML = list(WS_FIND, v);
+      $('ws-capture').innerHTML = list(WS_CAPTURE, v);
+
+      const sug = $('ws-suggest');
+      if (v.apipa) sug.innerHTML = `${esc(v.ip)} is a link-local (APIPA) address. Leave your laptop on DHCP with no DHCP server connected and it takes a 169.254 address of its own within about a minute, or set <b>${esc(v.laptop)}/16</b> by hand.`;
+      else if (v.laptopN === null) sug.textContent = `A /${v.p} has no room for a second address. Check the prefix.`;
+      else sug.innerHTML = `Suggested laptop address: <b>${esc(v.laptop)}/${v.p}</b> (mask ${esc(v.mask)}). It's in the same subnet as ${esc(v.ip)}. Confirm it's free in step 3.`;
+
+      $('ws-steps').innerHTML = steps(v).map(([t, b]) => `<li><h3>${esc(t)}</h3><div class="step-body">${b}</div></li>`).join('');
+
+      const win = st.os === 'windows';
+      $('ws-shortcuts').innerHTML =
+        `<p class="cap">If the device has a 169.254 address, leave your laptop on DHCP with no DHCP server connected. It gives itself a 169.254 address too, and both land in the same /16.</p>` +
+        cmdHTML(win
+          ? { cmd: 'ping {ll}%12', what: 'IPv6 link-local needs no setup on either side. Replace 12 with your interface index from netsh interface ipv6 show interfaces. The address shown is built from the MAC (EUI-64); many newer devices use a random one, so read the real one from the capture.' }
+          : { cmd: 'ping -c 4 {ll}%{iface}', what: 'IPv6 link-local needs no setup on either side. The address shown is built from the MAC (EUI-64); many newer devices use a random one, so read the real one from the capture.' }, v);
+      store.set('capture', st);
+    }
+
+    function sync() {
+      $('ws-os-' + st.os).checked = true;
+      f.ip.value = st.ip;
+      f.prefix.value = st.prefix;
+      f.mac.value = st.mac;
+      f.size.value = st.size;
+      f.iface.value = st.os === 'windows' ? st.ifaceWin : st.ifaceLinux;
+      f.iface.placeholder = st.os === 'windows' ? 'Ethernet' : 'eth0';
+    }
+
+    ['ip', 'prefix', 'mac', 'size'].forEach((k) => f[k].addEventListener('input', () => { st[k] = f[k].value; render(); }));
+    f.iface.addEventListener('input', () => {
+      if (st.os === 'windows') st.ifaceWin = f.iface.value; else st.ifaceLinux = f.iface.value;
+      render();
+    });
+    document.querySelectorAll('input[name="ws-os"]').forEach((r) => r.addEventListener('change', () => { st.os = r.value; sync(); render(); }));
+    sync();
+    render();
   }
 
   // ---------- Subnet solver ----------
@@ -1323,8 +1609,10 @@ Wireless LAN adapter Wi-Fi:
   const tests = initTests();
   const check = initCheck(() => tests.render());
   initScan(lookup, check);
+  initOverhead();
+  initCapture();
 
-  const VIEWS = ['lookup', 'scan', 'check', 'subnets'];
+  const VIEWS = ['lookup', 'scan', 'check', 'capture', 'subnets'];
   function route() {
     let v = location.hash.slice(1);
     if (!VIEWS.includes(v)) v = store.get('view', 'lookup');

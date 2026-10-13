@@ -9,6 +9,8 @@ An installable web app (PWA) for IPv4 work in the field. It works offline once i
   - **MTU and fragmentation**: `ping -f -l 1472` (Windows) or `ping -M do -s 1472` (Linux), with a calculator (data size = MTU − 28) and presets for PPPoE, GRE, VXLAN, VPN, and jumbo frames.
   - **Routes**: `route print`, `Find-NetRoute`, `ip route get`, `tracert`, `traceroute`, `pathping`, `mtr`.
   - **ARP**: `arp -a`, `Get-NetNeighbor`, `ip neigh`, `arping`, including duplicate-IP detection.
+  - **Tunnel and label overhead**: stack MPLS labels, GRE or GRE with key (mGRE/DMVPN), IPsec (tunnel or transport, several ciphers), NAT-T, PPPoE, VXLAN, and WireGuard to get the IP MTU, ping size, MSS, and Cisco `ip mtu` / `ip tcp adjust-mss` / `mpls mtu` settings. Work backward from the largest MTU that passed to the likely cause, and run Cisco IOS checks such as `ping ... size ... df-bit` and `ping mpls ipv4 ... sweep`.
+- **Capture**: Wireshark display filters, filled in with your values, for measuring data size (DF pings, fragments, "fragmentation needed", MSS, black-hole retransmits, tunnel traffic), ARP (gratuitous, probes, duplicates, wrong subnet), and finding a device's address (ARP, DHCP, APIPA, IPv6 link-local, LLDP/CDP, mDNS). Includes capture filters, an offload warning, and step-by-step commands to give your laptop an address in the device's subnet and connect to it.
 - **Subnets**: the borrowing-bits solver, with worked math and the hosts and subnets lookup tables.
 
 ## Files
